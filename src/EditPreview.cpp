@@ -48,7 +48,6 @@
 //! virtual host name that maps to the Notepad4.exe folder
 #define MD_PREVIEW_ASSETS_HOST	L"appassets"
 
-static const WCHAR *MD_PREVIEW_INI_KEY = L"MarkdownPreview";
 static const WCHAR *MD_PREVIEW_WD_INI_KEY = L"MarkdownPreviewWidth";
 
 static const WCHAR kPlaceholder[] = L"<html><head><meta charset=\"utf-8\"></head><body style=\"font-family:'Segoe UI','Microsoft YaHei';color:#888;margin:16px;\">Not a Markdown document.</body></html>";
@@ -154,7 +153,6 @@ static ICoreWebView2Controller *g_controller = nullptr;
 static ICoreWebView2Controller2 *g_controller2 = nullptr;
 static ICoreWebView2 *g_webview = nullptr;
 static bool g_bInitialized = false;
-static bool g_bEnabled = false;
 static bool g_bVisible = false;
 static bool g_bPendingLayout = false;
 static bool g_bDragging = false;
@@ -315,11 +313,8 @@ COREWEBVIEW2_COLOR EditPreview_GetDefaultBackgroundColor() noexcept {
 //=============================================================================
 void EditPreview_Init(HWND hwnd) noexcept {
 	g_hwndMain = hwnd;
-	g_bEnabled = IniGetInt(INI_SECTION_NAME_FLAGS, MD_PREVIEW_INI_KEY, 0) != 0;
 	g_iSplitWidth = IniGetInt(INI_SECTION_NAME_FLAGS, MD_PREVIEW_WD_INI_KEY, MD_PREVIEW_SPLIT_WIDTH);
-	if (g_bEnabled) {
-		EditPreview_CreateSplitter();
-	}
+	EditPreview_CreateSplitter();
 }
 
 //=============================================================================
@@ -429,7 +424,11 @@ public:
 							WCHAR exePath[MAX_PATH];
 							GetModuleFileName(nullptr, exePath, COUNTOF(exePath));
 							PathRemoveFileSpec(exePath);
-							g_webview->SetVirtualHostNameToFolderMapping(MD_PREVIEW_ASSETS_HOST, exePath, COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+							ICoreWebView2_3 *webview3 = nullptr;
+							if (SUCCEEDED(g_webview->QueryInterface(IID_PPV_ARGS(&webview3))) && webview3 != nullptr) {
+								webview3->SetVirtualHostNameToFolderMapping(MD_PREVIEW_ASSETS_HOST, exePath, COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+								webview3->Release();
+							}
 						}
 						if (SUCCEEDED(controller->QueryInterface(IID_PPV_ARGS(&g_controller2))) && g_controller2 != nullptr) {
 							g_controller2->put_DefaultBackgroundColor(EditPreview_GetDefaultBackgroundColor());
@@ -693,10 +692,6 @@ static void EditPreview_Update() noexcept {
 //
 //=============================================================================
 void EditPreview_Toggle() noexcept {
-	if (!g_bEnabled) {
-		MsgBoxInfo(MB_OK, IDS_ERR_MDPREVIEW_DISABLED);
-		return;
-	}
 	g_bVisible = !g_bVisible;
 
 	if (g_bVisible) {
