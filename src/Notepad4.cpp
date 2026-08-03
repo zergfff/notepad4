@@ -68,7 +68,7 @@ static HICON hTrayIcon = nullptr;
 static UINT uTrayIconDPI = 0;
 
 #define TOOLBAR_COMMAND_BASE	IDT_FILE_NEW
-#define DefaultToolbarButtons	L"22 3 0 1 27 2 0 4 18 19 0 5 6 0 7 8 9 20 0 10 11 0 12 0 24 0 13 14 0 15 16 0 17"
+#define DefaultToolbarButtons	L"22 3 0 1 2 0 4 18 19 0 5 6 0 7 8 9 20 0 10 11 0 12 0 24 0 13 14 0 15 16 0 17 0 27"
 static TBBUTTON tbbMainWnd[] = {
 	{0, 	0, 					0, 				 TBSTYLE_SEP, {0}, 0, 0},
 	{0, 	IDT_FILE_NEW, 		TBSTATE_ENABLED, TBSTYLE_BUTTON, {0}, 0, 0},
@@ -98,6 +98,9 @@ static TBBUTTON tbbMainWnd[] = {
 	{24, 	IDT_FILE_LAUNCH, 	TBSTATE_ENABLED, TBSTYLE_BUTTON, {0}, 0, 0},
 	{25, 	IDT_VIEW_ALWAYSONTOP, 	TBSTATE_ENABLED, TBSTYLE_BUTTON, {0}, 0, 0},
 	{26, 	IDT_FILE_NEWWINDOW, 	TBSTATE_ENABLED, TBSTYLE_BUTTON, {0}, 0, 0},
+#if NP2_SUPPORT_MD_PREVIEW
+	{27, 	IDM_VIEW_MDPREVIEW, 	TBSTATE_ENABLED, TBSTYLE_BUTTON, {0}, 0, 0},
+#endif
 };
 
 WCHAR	szIniFile[MAX_PATH];
@@ -4100,6 +4103,7 @@ LRESULT MsgCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 	case IDM_VIEW_MDPREVIEW:
 		EditPreview_Toggle();
 		MsgInitMenu(hwnd, 0, 0);
+		UpdateToolbar();
 		break;
 #endif
 
@@ -6458,6 +6462,9 @@ void UpdateToolbar() noexcept {
 
 	CheckTool(IDT_VIEW_WORDWRAP, fvCurFile.fWordWrap);
 	CheckTool(IDT_VIEW_ALWAYSONTOP, IsTopMost());
+#if NP2_SUPPORT_MD_PREVIEW
+	CheckTool(IDM_VIEW_MDPREVIEW, EditPreview_IsVisible());
+#endif
 }
 
 //=============================================================================

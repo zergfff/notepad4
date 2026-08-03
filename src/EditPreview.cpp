@@ -18,6 +18,7 @@
 #include <commdlg.h>
 #include <uxtheme.h>
 #include <objbase.h>
+#include <oleauto.h>
 #include <string>
 #include <cstdlib>
 #include <cstdio>
@@ -165,7 +166,6 @@ static int g_lastCy = 0;
 //=============================================================================
 // forward declarations
 //=============================================================================
-static void EditPreview_Update() noexcept;
 static void EditPreview_ApplyLayout() noexcept;
 static void EditPreview_Refresh() noexcept;
 static void EditPreview_SaveSplitWidth() noexcept;
@@ -370,6 +370,7 @@ bool EditPreview_IsMarkdown() noexcept {
 //
 //=============================================================================
 class EnvCompletedHandler final : public ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler {
+	ULONG refCount = 1;
 public:
 	EnvCompletedHandler() = default;
 
@@ -383,12 +384,26 @@ public:
 		return E_NOINTERFACE;
 	}
 
-	ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
-	ULONG STDMETHODCALLTYPE Release() override { return 1; }
+	ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount; }
+
+	ULONG STDMETHODCALLTYPE Release() override {
+		const ULONG refs = --refCount;
+		if (refs == 0) {
+			delete this;
+			return 0;
+		}
+		return refs;
+	}
 
 	HRESULT STDMETHODCALLTYPE Invoke(HRESULT result, ICoreWebView2Environment *env) override {
+		// the window may be destroyed while WebView2 is still initializing
+		if (!IsWindow(g_hwndMain)) {
+			Release();
+			return S_OK;
+		}
 		if (SUCCEEDED(result) && env != nullptr) {
 			class ControllerCompletedHandler final : public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler {
+				ULONG refCount = 1;
 			public:
 				ControllerCompletedHandler() = default;
 
@@ -402,12 +417,27 @@ public:
 					return E_NOINTERFACE;
 				}
 
-				ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
-				ULONG STDMETHODCALLTYPE Release() override { return 1; }
+				ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount; }
+
+				ULONG STDMETHODCALLTYPE Release() override {
+					const ULONG refs = --refCount;
+					if (refs == 0) {
+						delete this;
+						return 0;
+					}
+					return refs;
+				}
 
 				HRESULT STDMETHODCALLTYPE Invoke(HRESULT result2, ICoreWebView2Controller *controller) override {
 					if (SUCCEEDED(result2) && controller != nullptr) {
 						g_controller = controller;
+						g_controller->AddRef();	// keep our own reference
+						if (!IsWindow(g_hwndMain)) {
+							g_controller->Release();
+							g_controller = nullptr;
+							Release();
+							return S_OK;
+						}
 						g_controller->get_CoreWebView2(&g_webview);
 						if (g_webview != nullptr) {
 							ICoreWebView2Settings *settings = nullptr;
@@ -442,16 +472,13 @@ public:
 						}
 						EditPreview_Refresh();
 					}
-					delete this;
+					Release();	// release the reference created by new
 					return S_OK;
 				}
 			};
 			env->CreateCoreWebView2Controller(g_hwndMain, new ControllerCompletedHandler());
 		}
-		if (env != nullptr) {
-			env->Release();
-		}
-		delete this;
+		Release();	// release the reference created by new
 		return S_OK;
 	}
 };
@@ -675,15 +702,6 @@ void EditPreview_OnThemeChanged() noexcept {
 	if (g_bVisible) {
 		EditPreview_Refresh();
 	}
-}
-
-//=============================================================================
-//
-// EditPreview_Update()
-//
-//=============================================================================
-static void EditPreview_Update() noexcept {
-	EditPreview_Refresh();
 }
 
 //=============================================================================
