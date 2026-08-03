@@ -177,14 +177,28 @@ static const char kRenderScript[] = R"HTML(<script>
         if (!body) return;
         md = source;
         if (typeof marked === 'undefined') { body.textContent = md; return; }
-        var renderer = new marked.Renderer();
+        // Tag ATX headings (# ) with a stable sequential id that matches the
+        // editor's heading scan, so anchor indices align. Setext headings and
+        // headings inside blockquotes are left untagged.
+        var srcLines = md.split('\n');
         hx = 0;
-        renderer.heading = function (text, level, rawText, slugger) {
-            return '<h' + level + ' data-hx="' + (hx++) + '">' + text + '</h' + level + '>';
-        };
-        marked.setOptions({ renderer: renderer });
-        var html = marked.parse(md);
+        for (var i = 0; i < srcLines.length; i++) {
+            // [^\r\n]+ instead of .+ because '.' does not match CR, which is
+            // present on every line of CRLF files
+            var m = /^(#{1,6})[ \t]+([^\r\n]+)/.exec(srcLines[i]);
+            if (m) {
+                var level = m[1].length;
+                var inner = marked.parseInline(m[2]);
+                srcLines[i] = '<h' + level + ' id="hx-' + (hx++) + '">' + inner + '</h' + level + '>';
+            }
+        }
+        var html = marked.parse(srcLines.join('\n'));
         body.innerHTML = html;
+        if (window.chrome && window.chrome.webview) {
+            // report how many headings were tagged so the editor can verify
+            // the anchor indices are in agreement and fall back if not
+            window.chrome.webview.postMessage('headings:' + hx);
+        }
         var mermaidBlocks = document.querySelectorAll('pre > code.language-mermaid');
         if (mermaidBlocks.length > 0) {
             mermaidBlocks.forEach(function (code) {
@@ -205,15 +219,16 @@ static const char kRenderScript[] = R"HTML(<script>
     }
 
     window.previewAnchor = function (i) {
-        var el = document.querySelector('[data-hx="' + i + '"]');
+        var el = document.getElementById('hx-' + i);
         if (el) el.scrollIntoView({ block: 'start' });
     };
     function topHeadingIndex() {
-        var els = document.querySelectorAll('[data-hx]');
+        var els = document.querySelectorAll('[id^="hx-"]');
         var top = window.scrollY + 16;
         var best = -1;
         for (var i = 0; i < els.length; i++) {
-            if (els[i].offsetTop <= top) best = parseInt(els[i].getAttribute('data-hx'), 10);
+            var idx = parseInt(els[i].id.substring(3), 10);
+            if (els[i].offsetTop <= top) best = idx;
             else break;
         }
         return best;
@@ -278,7 +293,9 @@ static int g_lastCy = 0;
 static double g_dScrollRatio = 0.0;
 static int g_iAnchorIndex = -1;
 static bool g_bPageReady = false;
-// heading lines in document order (1-based Sci_Line), rebuilt on refresh
+static bool g_bAnchorValid = true;
+static int g_iJsHeadingCount = -1;
+// heading lines in document order (0-based Sci_Line), rebuilt on refresh
 static std::vector<Sci_Line> g_headings;
 
 //=============================================================================
@@ -435,6 +452,13 @@ public:
 					g_iAnchorIndex = _wtoi(p + CSTRLEN(L"anchor:"));
 					EditPreview_Log("[msg] anchor=%d", g_iAnchorIndex);
 					PostMessage(g_hwndMain, APPM_MDPREVIEW_ANCHOR, 0, 0);
+				} else if (WcsStartsWith(p, L"headings:") && IsWindow(g_hwndMain)) {
+					// the preview reports how many headings it tagged; if this
+					// does not match our scan, fall back to proportional sync
+					g_iJsHeadingCount = _wtoi(p + CSTRLEN(L"headings:"));
+					g_bAnchorValid = (g_iJsHeadingCount == static_cast<int>(g_headings.size()));
+					EditPreview_Log("[msg] headings js=%d cpp=%d anchor=%d", g_iJsHeadingCount,
+						static_cast<int>(g_headings.size()), static_cast<int>(g_bAnchorValid));
 				} else {
 					EditPreview_Log("[msg] unknown webview message '%ls'", p);
 				}
@@ -847,7 +871,8 @@ static void EditPreview_ScanHeadings() noexcept {
 		return;
 	}
 	// fetch the whole document once and scan in memory instead of one
-	// SendMessage per line
+	// SendMessage per line. Only ATX headings are collected, matching the
+	// headings the preview tags, so the anchor indices line up.
 	char *text = static_cast<char *>(NP2HeapAlloc(static_cast<size_t>(len) + 1));
 	if (text == nullptr) {
 		return;
@@ -864,8 +889,7 @@ static void EditPreview_ScanHeadings() noexcept {
 		}
 		const char *lineEnd = p;
 
-		bool isHeading = false;
-		// ATX heading: ^#{1,6}\s
+		// ATX heading: ^#{1,6}\s+<non-empty content>
 		const char *q = lineStart;
 		int level = 0;
 		while (level < 6 && q < lineEnd && *q == '#') {
@@ -873,33 +897,13 @@ static void EditPreview_ScanHeadings() noexcept {
 			++q;
 		}
 		if (level >= 1 && q < lineEnd && (*q == ' ' || *q == '\t')) {
-			isHeading = true;
-		}
-		if (!isHeading && lineEnd > lineStart && p < end) {
-			// setext heading: next line is all '=' or all '-'
-			const char *nstart = p + 1;
-			const char *n = nstart;
-			while (n < end && *n != '\n') {
-				++n;
+			const char *t = q;
+			while (t < lineEnd && (*t == ' ' || *t == '\t')) {
+				++t;
 			}
-			bool eq = true, dash = true;
-			int hasEq = 0, hasDash = 0;
-			for (const char *c = nstart; c < n; ++c) {
-				if (*c == '=') {
-					++hasEq;
-				} else if (*c == '-') {
-					++hasDash;
-				} else if (*c != ' ' && *c != '\t' && *c != '\r') {
-					eq = dash = false;
-				}
+			if (t < lineEnd) {
+				g_headings.push_back(line);
 			}
-			if ((hasEq > 0 && eq) || (hasDash > 0 && dash)) {
-				isHeading = true;
-				p = n;
-			}
-		}
-		if (isHeading) {
-			g_headings.push_back(line);
 		}
 
 		if (p < end) {
@@ -1139,8 +1143,9 @@ static void EditPreview_SyncToPreview() noexcept {
 		return;
 	}
 
-	// anchor mode: scroll the preview to the nearest heading at/above the top line
-	if (!g_headings.empty()) {
+	// anchor mode: scroll the preview to the nearest heading at/above the top
+	// line, but only when the editor/preview heading lists are in agreement
+	if (g_bAnchorValid && !g_headings.empty()) {
 		size_t lo = 0, hi = g_headings.size();
 		while (lo < hi) {
 			const size_t mid = (lo + hi) / 2;
@@ -1222,6 +1227,10 @@ void EditPreview_SyncEditScroll() noexcept {
 //=============================================================================
 void EditPreview_SyncEditAnchor() noexcept {
 	if (!g_bVisible || g_bSyncingScroll) {
+		return;
+	}
+	if (!g_bAnchorValid) {
+		// heading anchors are unreliable, keep proportional sync only
 		return;
 	}
 	if (g_iAnchorIndex < 0 || g_iAnchorIndex >= static_cast<int>(g_headings.size())) {
