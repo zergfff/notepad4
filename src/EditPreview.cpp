@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstddef>
+#include <cwchar>
 #include <WebView2.h>
 
 #include "Helpers.h"
@@ -66,41 +67,48 @@ static const char kHtmlHead[] = R"HTML(<!DOCTYPE html>
 <script src="https://appassets/marked.min.js"></script>
 <script src="https://appassets/mermaid.min.js"></script>
 <style>
-body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-       font-size: 14px; line-height: 1.7; margin: 16px; color: #1f2328; background: #ffffff; }
+:root {
+  --bg: #ffffff; --fg: #1f2328; --border: #d8dee4; --code-bg: #f6f8fa;
+  --quote: #d0d7de; --muted: #57606a; --link: #0969da;
+}
+body[data-theme="light"] {
+  --bg: #ffffff; --fg: #1f2328; --border: #d8dee4; --code-bg: #f6f8fa;
+  --quote: #d0d7de; --muted: #57606a; --link: #0969da;
+}
+body[data-theme="dark"] {
+  --bg: #0d1117; --fg: #c9d1d9; --border: #21262d; --code-bg: #161b22;
+  --quote: #30363d; --muted: #8b949e; --link: #58a6ff;
+}
+@media (prefers-color-scheme: dark) {
+  body[data-theme="auto"] {
+    --bg: #0d1117; --fg: #c9d1d9; --border: #21262d; --code-bg: #161b22;
+    --quote: #30363d; --muted: #8b949e; --link: #58a6ff;
+  }
+}
+body { background: var(--bg); color: var(--fg); min-height: 100vh;
+       box-sizing: border-box; margin: 0; padding: 16px;
+       font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+       font-size: 14px; line-height: 1.7; }
 h1, h2, h3, h4, h5, h6 { margin: 1.2em 0 0.6em; line-height: 1.3; }
-h1 { border-bottom: 1px solid #d8dee4; padding-bottom: .3em; }
-h2 { border-bottom: 1px solid #d8dee4; padding-bottom: .3em; }
-a { color: #0969da; text-decoration: none; }
+h1 { border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+h2 { border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 code { font-family: Consolas, "Courier New", monospace; font-size: 88%;
-       background: #f6f8fa; padding: 2px 4px; border-radius: 4px; }
-pre { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow: auto; }
+       background: var(--code-bg); padding: 2px 4px; border-radius: 4px; }
+pre { background: var(--code-bg); padding: 12px; border-radius: 6px; overflow: auto; }
 pre code { background: none; padding: 0; }
-blockquote { margin: 0; padding-left: 12px; border-left: 4px solid #d0d7de; color: #57606a; }
+blockquote { margin: 0; padding-left: 12px; border-left: 4px solid var(--quote); color: var(--muted); }
 table { border-collapse: collapse; margin: 8px 0; }
-th, td { border: 1px solid #d0d7de; padding: 6px 12px; }
-th { background: #f6f8fa; font-weight: 600; }
+th, td { border: 1px solid var(--quote); padding: 6px 12px; }
+th { background: var(--code-bg); font-weight: 600; }
 img { max-width: 100%; }
-hr { border: none; border-top: 1px solid #d0d7de; margin: 1.5em 0; }
+hr { border: none; border-top: 1px solid var(--quote); margin: 1.5em 0; }
 input[type="checkbox"] { margin-right: 6px; }
 .mermaid { background: transparent; }
 pre.mermaid { text-align: center; }
-@media (prefers-color-scheme: dark) {
-  body { color: #c9d1d9; background: #0d1117; }
-  a { color: #58a6ff; }
-  code { background: #161b22; }
-  pre { background: #161b22; }
-  blockquote { border-left-color: #30363d; color: #8b949e; }
-  th, td { border-color: #30363d; }
-  th { background: #161b22; }
-  h1, h2 { border-bottom-color: #21262d; }
-  hr { border-top-color: #30363d; }
-}
 </style>
 </head>
-<body>
-<div id="md-body">Loading...</div>
 )HTML";
 
 static const char kRenderScript[] = R"HTML(<script>
@@ -124,11 +132,20 @@ static const char kRenderScript[] = R"HTML(<script>
             pre.removeChild(code);
         });
         if (typeof mermaid !== 'undefined') {
-            var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            var attr = document.body.getAttribute('data-theme');
+            var dark = attr === 'dark' || (attr === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
             try {
                 mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default', securityLevel: 'loose' });
                 mermaid.run();
             } catch (e) { /* ignore render errors */ }
+        }
+    }
+    function syncScroll() {
+        var doc = document.documentElement;
+        var max = doc.scrollHeight - window.innerHeight;
+        var r = max > 0 ? (window.scrollY / max) : 0;
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage('scroll:' + r.toFixed(4));
         }
     }
     if (document.readyState === 'loading') {
@@ -136,6 +153,7 @@ static const char kRenderScript[] = R"HTML(<script>
     } else {
         render();
     }
+    window.addEventListener('scroll', syncScroll, { passive: true });
 })();
 </script>
 )HTML";
@@ -157,11 +175,14 @@ static bool g_bInitialized = false;
 static bool g_bVisible = false;
 static bool g_bPendingLayout = false;
 static bool g_bDragging = false;
+static bool g_bSyncingScroll = false;
 static UINT_PTR g_uTimer = 0;
+static int g_iPreviewTheme = MDPreviewTheme_Auto;
 static int g_iSplitWidth = MD_PREVIEW_SPLIT_WIDTH;
 static int g_lastY = 0;
 static int g_lastCx = 0;
 static int g_lastCy = 0;
+static double g_dScrollRatio = 0.0;
 
 //=============================================================================
 // forward declarations
@@ -169,6 +190,7 @@ static int g_lastCy = 0;
 static void EditPreview_ApplyLayout() noexcept;
 static void EditPreview_Refresh() noexcept;
 static void EditPreview_SaveSplitWidth() noexcept;
+static void EditPreview_SyncToPreview() noexcept;
 COREWEBVIEW2_COLOR EditPreview_GetDefaultBackgroundColor() noexcept;
 
 //=============================================================================
@@ -260,7 +282,68 @@ LRESULT CALLBACK EditPreview_SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LP
 
 //=============================================================================
 //
-// EditPreview_RegisterSplitterClass()
+// WebMessageHandler()
+//
+//   Receives "scroll:<ratio>" messages from the preview page and forwards
+//   them to the main window so the editor can follow the preview.
+//
+//=============================================================================
+class WebMessageHandler final : public ICoreWebView2WebMessageReceivedEventHandler {
+	ULONG refCount = 1;
+public:
+	WebMessageHandler() = default;
+
+	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+		if (riid == __uuidof(IUnknown) || riid == __uuidof(ICoreWebView2WebMessageReceivedEventHandler)) {
+			*ppvObject = this;
+			AddRef();
+			return S_OK;
+		}
+		*ppvObject = nullptr;
+		return E_NOINTERFACE;
+	}
+
+	ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount; }
+
+	ULONG STDMETHODCALLTYPE Release() override {
+		const ULONG refs = --refCount;
+		if (refs == 0) {
+			delete this;
+			return 0;
+		}
+		return refs;
+	}
+
+	HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *sender, ICoreWebView2WebMessageReceivedEventArgs *args) override {
+		UNREFERENCED_PARAMETER(sender);
+		if (args != nullptr) {
+			LPWSTR json = nullptr;
+			// get_WebMessageAsJson returns the raw string as a JSON string, e.g. "\"scroll:0.5\""
+			if (SUCCEEDED(args->get_WebMessageAsJson(&json)) && json != nullptr) {
+				LPCWSTR p = json;
+				if (*p == L'"') {
+					++p;
+				}
+				if (WcsStartsWith(p, L"scroll:") && IsWindow(g_hwndMain)) {
+					g_dScrollRatio = wcstod(p + CSTRLEN(L"scroll:"), nullptr);
+					if (g_dScrollRatio < 0.0) {
+						g_dScrollRatio = 0.0;
+					} else if (g_dScrollRatio > 1.0) {
+						g_dScrollRatio = 1.0;
+					}
+					PostMessage(g_hwndMain, APPM_MDPREVIEW_SCROLL, 0, 0);
+				}
+				CoTaskMemFree(json);
+			}
+		}
+		Release();
+		return S_OK;
+	}
+};
+
+//=============================================================================
+//
+// EditPreview_InitWebView()
 //
 //=============================================================================
 static bool EditPreview_RegisterSplitterClass() noexcept {
@@ -314,6 +397,7 @@ COREWEBVIEW2_COLOR EditPreview_GetDefaultBackgroundColor() noexcept {
 void EditPreview_Init(HWND hwnd) noexcept {
 	g_hwndMain = hwnd;
 	g_iSplitWidth = IniGetInt(INI_SECTION_NAME_FLAGS, MD_PREVIEW_WD_INI_KEY, MD_PREVIEW_SPLIT_WIDTH);
+	g_iPreviewTheme = IniGetInt(INI_SECTION_NAME_FLAGS, L"MarkdownPreviewTheme", MDPreviewTheme_Auto);
 	EditPreview_CreateSplitter();
 }
 
@@ -459,6 +543,8 @@ public:
 								webview3->SetVirtualHostNameToFolderMapping(MD_PREVIEW_ASSETS_HOST, exePath, COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
 								webview3->Release();
 							}
+							// receive "scroll:<ratio>" messages from the page for sync scrolling
+							g_webview->add_WebMessageReceived(new WebMessageHandler(), nullptr);
 						}
 						if (SUCCEEDED(controller->QueryInterface(IID_PPV_ARGS(&g_controller2))) && g_controller2 != nullptr) {
 							g_controller2->put_DefaultBackgroundColor(EditPreview_GetDefaultBackgroundColor());
@@ -622,7 +708,14 @@ static void EditPreview_Refresh() noexcept {
 	std::string html;
 	html.reserve(static_cast<size_t>(len) * 2 + CSTRLEN(kHtmlHead) + CSTRLEN(kRenderScript) + CSTRLEN(kHtmlTail) + 256);
 	html.assign(kHtmlHead);
-	html += "<script type=\"application/json\" id=\"md-source\">";
+	const char *themeStr = "auto";
+	switch (g_iPreviewTheme) {
+	case MDPreviewTheme_Light: themeStr = "light"; break;
+	case MDPreviewTheme_Dark: themeStr = "dark"; break;
+	}
+	html += "<body data-theme=\"";
+	html += themeStr;
+	html += "\">\n<div id=\"md-body\">Loading...</div>\n<script type=\"application/json\" id=\"md-source\">";
 	JsonEscapeAppend(pText, static_cast<size_t>(len), html);
 	html += "</script>";
 	html += kRenderScript;
@@ -728,6 +821,98 @@ void EditPreview_Toggle() noexcept {
 
 	// re-layout the editor window
 	PostMessage(g_hwndMain, WM_SIZE, SIZE_RESTORED, MAKELPARAM(g_lastCx, g_lastCy));
+}
+
+//=============================================================================
+//
+// EditPreview_GetTheme()
+//
+//=============================================================================
+int EditPreview_GetTheme() noexcept {
+	return g_iPreviewTheme;
+}
+
+//=============================================================================
+//
+// EditPreview_SetTheme()
+//
+//=============================================================================
+void EditPreview_SetTheme(int theme) noexcept {
+	if (theme < MDPreviewTheme_Auto || theme > MDPreviewTheme_Dark) {
+		theme = MDPreviewTheme_Auto;
+	}
+	if (g_iPreviewTheme != theme) {
+		g_iPreviewTheme = theme;
+		IniSetInt(INI_SECTION_NAME_FLAGS, L"MarkdownPreviewTheme", theme);
+		if (g_bVisible) {
+			EditPreview_Refresh();
+		}
+	}
+}
+
+//=============================================================================
+//
+// EditPreview_SyncToPreview()
+//
+//   Scrolls the preview pane to match the editor position (ratio based).
+//
+//=============================================================================
+static void EditPreview_SyncToPreview() noexcept {
+	if (!g_bVisible || g_webview == nullptr || g_bSyncingScroll) {
+		return;
+	}
+	const Sci_Line total = SciCall_GetLineCount();
+	if (total <= 0) {
+		return;
+	}
+	const Sci_Line first = SciCall_GetFirstVisibleLine();
+	double ratio = static_cast<double>(first) / total;
+	if (ratio < 0.0) {
+		ratio = 0.0;
+	} else if (ratio > 1.0) {
+		ratio = 1.0;
+	}
+	WCHAR js[128];
+	swprintf(js, COUNTOF(js), L"window.scrollTo(0,%f*(document.documentElement.scrollHeight-window.innerHeight));", ratio);
+	g_webview->ExecuteScript(js, nullptr);
+}
+
+//=============================================================================
+//
+// EditPreview_OnEditScroll()
+//
+//   Called when the editor is scrolled (SCN_UPDATEUI, SC_UPDATE_V_SCROLL).
+//
+//=============================================================================
+void EditPreview_OnEditScroll() noexcept {
+	EditPreview_SyncToPreview();
+}
+
+//=============================================================================
+//
+// EditPreview_SyncEditScroll()
+//
+//   Called when the preview pane is scrolled (APPM_MDPREVIEW_SCROLL).
+//   Scrolls the editor to match the preview position.
+//
+//=============================================================================
+void EditPreview_SyncEditScroll() noexcept {
+	if (!g_bVisible || g_bSyncingScroll) {
+		return;
+	}
+	const Sci_Line total = SciCall_GetLineCount();
+	if (total <= 0) {
+		return;
+	}
+	Sci_Line line = static_cast<Sci_Line>(g_dScrollRatio * total);
+	if (line < 0) {
+		line = 0;
+	} else if (line > total - 1) {
+		line = total - 1;
+	}
+	g_bSyncingScroll = true;
+	SciCall_SetFirstVisibleLine(line);
+	g_bSyncingScroll = false;
 }
 
 #endif // NP2_SUPPORT_MD_PREVIEW

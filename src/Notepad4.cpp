@@ -1248,6 +1248,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
 		MsgDropFiles(hwnd, umsg, wParam);
 		break;
 
+#if NP2_SUPPORT_MD_PREVIEW
+	case APPM_MDPREVIEW_SCROLL:
+		EditPreview_SyncEditScroll();
+		break;
+#endif
+
 	case WM_COPYDATA: {
 		PCOPYDATASTRUCT pcds = AsPointer<PCOPYDATASTRUCT>(lParam);
 
@@ -2559,6 +2565,8 @@ void MsgInitMenu(HWND hwnd, WPARAM wParam, LPARAM lParam) noexcept {
 	EnableCmd(hmenu, IDM_VIEW_CUSTOMIZE_TOOLBAR, bShowToolbar);
 #if NP2_SUPPORT_MD_PREVIEW
 	CheckCmd(hmenu, IDM_VIEW_MDPREVIEW, EditPreview_IsVisible());
+	CheckMenuRadioItem(hmenu, IDM_VIEW_MDPREVIEW_THEME_AUTO, IDM_VIEW_MDPREVIEW_THEME_DARK,
+		IDM_VIEW_MDPREVIEW_THEME_AUTO + EditPreview_GetTheme(), MF_BYCOMMAND);
 #endif
 	CheckCmd(hmenu, IDM_VIEW_AUTO_SCALE_TOOLBAR, iAutoScaleToolbar);
 #if NP2_ENABLE_HIDPI_IMAGE_RESOURCE
@@ -4105,6 +4113,12 @@ LRESULT MsgCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 		MsgInitMenu(hwnd, 0, 0);
 		UpdateToolbar();
 		break;
+
+	case IDM_VIEW_MDPREVIEW_THEME_AUTO:
+	case IDM_VIEW_MDPREVIEW_THEME_LIGHT:
+	case IDM_VIEW_MDPREVIEW_THEME_DARK:
+		EditPreview_SetTheme(LOWORD(wParam) - IDM_VIEW_MDPREVIEW_THEME_AUTO);
+		break;
 #endif
 
 	case IDM_VIEW_CUSTOMIZE_TOOLBAR:
@@ -4665,6 +4679,11 @@ LRESULT MsgNotify(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 		switch (pnmh->code) {
 		case SCN_UPDATEUI: {
 			const unsigned updated = scn->updated;
+#if NP2_SUPPORT_MD_PREVIEW
+			if (updated & SC_UPDATE_V_SCROLL) {
+				EditPreview_OnEditScroll();
+			}
+#endif
 			if (updated & ~(SC_UPDATE_V_SCROLL | SC_UPDATE_H_SCROLL)) {
 				UpdateToolbar();
 				if (updated & SC_UPDATE_LINE_COUNT) {
