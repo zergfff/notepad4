@@ -640,6 +640,10 @@ BEGIN
 			END
 #endif
 		END
+#if NP2_ENABLE_MD_PREVIEW
+		MENUITEM SEPARATOR
+		MENUITEM "Markdown Pre&view\tCtrl+F10",	IDM_VIEW_MDPREVIEW
+#endif
 		POPUP "Window O&ptions"
 		BEGIN
 			MENUITEM "Always On &Top\tAlt+Shift+T",	IDM_VIEW_ALWAYSONTOP
@@ -966,6 +970,7 @@ BEGIN
     VK_INSERT,      IDM_EDIT_COPY,              VIRTKEY, CONTROL, NOINVERT
     VK_F1,          IDM_HELP_ABOUT,             VIRTKEY, NOINVERT
     VK_F10,         IDM_FILE_READONLY_MODE,     VIRTKEY, NOINVERT
+    VK_F10,         IDM_VIEW_MDPREVIEW,         VIRTKEY, CONTROL, NOINVERT
     VK_F11,         IDM_VIEW_TOGGLE_FULLSCREEN, VIRTKEY, NOINVERT
     VK_F11,         IDM_VIEW_TOOLBAR,           VIRTKEY, CONTROL, NOINVERT
     VK_F11,         IDM_VIEW_MENU,              VIRTKEY, ALT, NOINVERT
@@ -1830,6 +1835,7 @@ BEGIN
     IDS_ERR_LOADFILE        "Error loading ""%s""."
     IDS_ERR_SAVEFILE        "Error saving ""%s""."
     IDS_ERR_BROWSE          "No file browser plugin was found.\nThe matepath file browser plugin can be downloaded from\nhttps://github.com/zufuliu/notepad4/releases.\n\nOpen download page?"
+    IDS_ERR_MDPREVIEW_DISABLED "Markdown live preview is not enabled in this build.\nIt can be enabled by defining NP2_ENABLE_MD_PREVIEW in src/config.h."
     IDS_ERR_MRUDLG          "No access to the selected file!\nWould you like to remove it from the list?"
     IDS_ERR_CREATELINK      "Error creating the Desktop link."
     IDS_ERR_PREVWINDISABLED "Existing Notepad4 window is busy or has an active dialog box.\nWould you like to open another Notepad4 window?"

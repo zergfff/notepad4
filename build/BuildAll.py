@@ -25,6 +25,7 @@ defaultConfig = {
 	'NP2_ENABLE_TEST_LOCALIZATION_LAYOUT': 0,
 	'NP2_ENABLE_LOCALIZE_LEXER_NAME': 1,
 	'NP2_ENABLE_LOCALIZE_STYLE_NAME': 1,
+	'NP2_ENABLE_MD_PREVIEW': 1,
 }
 
 def get_locale_override_config(locale, hd):

@@ -157,7 +157,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\scintilla\include;..\..\scintilla\lexlib;..\..\scintilla\src;..\..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\scintilla\include;..\..\scintilla\lexlib;..\..\scintilla\src;..\..\src;..\..\cmark\src;..\..\webview2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_WINDOWS;NOMINMAX;WIN32_LEAN_AND_MEAN;STRICT_TYPED_ITEMIDS;BOOST_REGEX_STANDALONE;NO_CXX11_REGEX;UNICODE;_UNICODE;_CRT_SECURE_NO_WARNINGS;_SCL_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level4</WarningLevel>
       <LanguageStandard>stdcpplatest</LanguageStandard>
@@ -168,7 +168,8 @@
       <BuildStlModules>false</BuildStlModules>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>comctl32.lib;shlwapi.lib;imm32.lib;uxtheme.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Platform)'=='Win32'">comctl32.lib;shlwapi.lib;imm32.lib;uxtheme.lib;version.lib;..\..\webview2\lib\x86\WebView2LoaderStatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Platform)'=='x64'">comctl32.lib;shlwapi.lib;imm32.lib;uxtheme.lib;version.lib;..\..\webview2\lib\x64\WebView2LoaderStatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
     </Link>
@@ -267,7 +268,7 @@
       <PreprocessorDefinitions>_DEBUG;_WIN64;_WIN32_WINNT=0x0A00;WINVER=0x0A00;PopulationCount64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>gdi32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>gdi32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;version.lib;..\..\webview2\lib\arm64\WebView2LoaderStatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <MinimumRequiredVersion>10.00</MinimumRequiredVersion>
     </Link>
     <ResourceCompile>
@@ -316,7 +317,7 @@
       <AdditionalOptions>-Wextra -Wshadow -Wimplicit-fallthrough -Wformat=2 -Wundef -Wcomma %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>gdi32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>gdi32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;version.lib;..\..\webview2\lib\arm64\WebView2LoaderStatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <MinimumRequiredVersion>10.00</MinimumRequiredVersion>
     </Link>
     <ResourceCompile>
@@ -402,7 +403,7 @@
       <AdditionalOptions>/GA /Zc:threadSafeInit- /wd26429 /wd26446 /wd26472 /wd26481 /wd26482 /wd26485 /wd26486 /wd26489 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>gdi32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>gdi32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;version.lib;..\..\webview2\lib\arm64\WebView2LoaderStatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <MinimumRequiredVersion>10.00</MinimumRequiredVersion>
     </Link>
     <ResourceCompile>
@@ -451,7 +452,7 @@
       <AdditionalOptions>/GA /Zc:threadSafeInit- -Wextra -Wshadow -Wimplicit-fallthrough -Wformat=2 -Wundef -Wcomma %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>gdi32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>gdi32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;version.lib;..\..\webview2\lib\arm64\WebView2LoaderStatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <MinimumRequiredVersion>10.00</MinimumRequiredVersion>
     </Link>
     <ResourceCompile>
@@ -590,6 +591,7 @@
     <ClCompile Include="..\..\src\Edit.cpp" />
     <ClCompile Include="..\..\src\EditAutoC.cpp" />
     <ClCompile Include="..\..\src\EditEncoding.cpp" />
+    <ClCompile Include="..\..\src\EditPreview.cpp" />
     <ClCompile Include="..\..\src\Helpers.cpp" />
     <ClCompile Include="..\..\src\Notepad4.cpp" />
     <ClCompile Include="..\..\src\Styles.cpp" />
@@ -676,6 +678,30 @@
     <ClCompile Include="..\..\src\EditLexers\stlXML.cpp" />
     <ClCompile Include="..\..\src\EditLexers\stlYAML.cpp" />
     <ClCompile Include="..\..\src\EditLexers\stlZig.cpp" />
+    <ClCompile Include="..\..\cmark\src\blocks.c" />
+    <ClCompile Include="..\..\cmark\src\buffer.c" />
+    <ClCompile Include="..\..\cmark\src\cmark.c" />
+    <ClCompile Include="..\..\cmark\src\cmark_ctype.c" />
+    <ClCompile Include="..\..\cmark\src\commonmark.c" />
+    <ClCompile Include="..\..\cmark\src\houdini_href_e.c" />
+    <ClCompile Include="..\..\cmark\src\houdini_html_e.c" />
+    <ClCompile Include="..\..\cmark\src\houdini_html_u.c" />
+    <ClCompile Include="..\..\cmark\src\html.c" />
+    <ClCompile Include="..\..\cmark\src\inlines.c" />
+    <ClCompile Include="..\..\cmark\src\iterator.c" />
+    <ClCompile Include="..\..\cmark\src\latex.c" />
+    <ClCompile Include="..\..\cmark\src\man.c" />
+    <ClCompile Include="..\..\cmark\src\node.c" />
+    <ClCompile Include="..\..\cmark\src\references.c" />
+    <ClCompile Include="..\..\cmark\src\render.c" />
+    <ClCompile Include="..\..\cmark\src\scanners.c" />
+    <ClCompile Include="..\..\cmark\src\utf8.c" />
+    <ClCompile Include="..\..\cmark\src\xml.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Update="..\..\cmark\src\*.c">
+      <CallingConvention>Cdecl</CallingConvention>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\scintilla\include\GraphicUtils.h" />
@@ -755,6 +781,7 @@
     <ClInclude Include="..\..\src\EditLexer.h" />
     <ClInclude Include="..\..\src\EditLexers/EditStyle.h" />
     <ClInclude Include="..\..\src\EditLexers/EditStyleX.h" />
+    <ClInclude Include="..\..\src\EditPreview.h" />
     <ClInclude Include="..\..\src\Helpers.h" />
     <ClInclude Include="..\..\src\Notepad4.h" />
     <ClInclude Include="..\..\src\Resource.h" />
@@ -762,6 +789,23 @@
     <ClInclude Include="..\..\src\Styles.h" />
     <ClInclude Include="..\..\src\Version.h" />
     <ClInclude Include="..\..\src\VersionRev.h" />
+    <ClInclude Include="..\..\cmark\src\buffer.h" />
+    <ClInclude Include="..\..\cmark\src\chunk.h" />
+    <ClInclude Include="..\..\cmark\src\cmark.h" />
+    <ClInclude Include="..\..\cmark\src\cmark_ctype.h" />
+    <ClInclude Include="..\..\cmark\src\cmark_export.h" />
+    <ClInclude Include="..\..\cmark\src\cmark_version.h" />
+    <ClInclude Include="..\..\cmark\src\houdini.h" />
+    <ClInclude Include="..\..\cmark\src\inlines.h" />
+    <ClInclude Include="..\..\cmark\src\iterator.h" />
+    <ClInclude Include="..\..\cmark\src\node.h" />
+    <ClInclude Include="..\..\cmark\src\parser.h" />
+    <ClInclude Include="..\..\cmark\src\references.h" />
+    <ClInclude Include="..\..\cmark\src\render.h" />
+    <ClInclude Include="..\..\cmark\src\scanners.h" />
+    <ClInclude Include="..\..\cmark\src\utf8.h" />
+    <ClInclude Include="..\..\webview2\include\WebView2.h" />
+    <ClInclude Include="..\..\webview2\include\WebView2EnvironmentOptions.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\res\Copy.cur" />

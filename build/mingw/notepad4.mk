@@ -12,6 +12,9 @@ INCDIR = \
 	-I"../../src/EditLexers" \
 	-I"$(scintilla_dir)/include"
 
+# Markdown preview pane requires WebView2 SDK and cmark, not available in mingw builds.
+CPPFLAGS += -DNP2_ENABLE_MD_PREVIEW=0
+
 LDFLAGS += -L"$(BINFOLDER)/obj"
 
 LDLIBS += -limm32
@@ -22,7 +25,7 @@ editlexers_obj = $(patsubst $(editlexers_dir)/%.cpp,$(OBJDIR)/%.obj,$(editlexers
 # c_src = $(wildcard $(SRCDIR)/*.c)
 # c_obj = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.obj,$(c_src))
 
-cpp_src = $(wildcard $(SRCDIR)/*.cpp)
+cpp_src = $(filter-out $(SRCDIR)/EditPreview.cpp,$(wildcard $(SRCDIR)/*.cpp))
 cpp_obj = $(patsubst $(SRCDIR)/%.cpp,$(OBJDIR)/%.obj,$(cpp_src))
 
 rc_src = $(wildcard $(SRCDIR)/*.rc)

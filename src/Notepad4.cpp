@@ -36,6 +36,7 @@
 #include "DarkMode.h"
 #include "Notepad4.h"
 #include "Edit.h"
+#include "EditPreview.h"
 #include "Styles.h"
 #include "Dialogs.h"
 #include "resource.h"
@@ -1132,6 +1133,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
 			// Remove tray icon if necessary
 			ShowNotifyIcon(hwnd, false);
 
+#if NP2_SUPPORT_MD_PREVIEW
+			EditPreview_OnDestroy();
+#endif
+
 			bShutdownOK = true;
 		}
 		if (umsg == WM_DESTROY) {
@@ -1193,6 +1198,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
 		if (wParam == ID_AUTOSAVETIMER) {
 			AutoSave_DoWork(FileSaveFlag_Default);
 		}
+#if NP2_SUPPORT_MD_PREVIEW
+		else if (wParam == ID_MDPREVIEWTIMER) {
+			EditPreview_OnTimer();
+		}
+#endif
 		break;
 
 	case WM_SIZE:
@@ -1859,6 +1869,9 @@ LRESULT MsgCreate(HWND hwnd, WPARAM wParam, LPARAM lParam) noexcept {
 	mruFile.Init(MRU_KEY_RECENT_FILES, iMaxRecentFiles, flags);
 	mruFind.Init(MRU_KEY_RECENT_FIND, MRU_MAXITEMS, MRUFlags_QuoteValue);
 	mruReplace.Init(MRU_KEY_RECENT_REPLACE, MRU_MAXITEMS, MRUFlags_QuoteValue);
+#if NP2_SUPPORT_MD_PREVIEW
+	EditPreview_Init(hwnd);
+#endif
 	return 0;
 }
 
@@ -2067,6 +2080,9 @@ void MsgThemeChanged(HWND hwnd, WPARAM wParam, LPARAM lParam) noexcept {
 	SendMessage(hwnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(rc.right, rc.bottom));
 	UpdateToolbar();
 	UpdateStatusbar();
+#if NP2_SUPPORT_MD_PREVIEW
+	EditPreview_OnThemeChanged();
+#endif
 }
 
 //=============================================================================
@@ -2114,7 +2130,12 @@ void MsgSize(HWND hwnd, WPARAM wParam, LPARAM lParam) noexcept {
 		cy -= (rc.bottom - rc.top);
 	}
 
-	SetWindowPos(hwndEdit, nullptr, x, y, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
+#if NP2_SUPPORT_MD_PREVIEW
+	const int editWidth = EditPreview_OnSize(y, cx, cy);
+#else
+	const int editWidth = cx;
+#endif
+	SetWindowPos(hwndEdit, nullptr, x, y, editWidth, cy, SWP_NOZORDER | SWP_NOACTIVATE);
 
 	// resize Statusbar items
 	UpdateStatusbar();
@@ -2533,6 +2554,9 @@ void MsgInitMenu(HWND hwnd, WPARAM wParam, LPARAM lParam) noexcept {
 	CheckCmd(hmenu, IDM_VIEW_MENU, bShowMenu);
 	CheckCmd(hmenu, IDM_VIEW_TOOLBAR, bShowToolbar);
 	EnableCmd(hmenu, IDM_VIEW_CUSTOMIZE_TOOLBAR, bShowToolbar);
+#if NP2_SUPPORT_MD_PREVIEW
+	CheckCmd(hmenu, IDM_VIEW_MDPREVIEW, EditPreview_IsVisible());
+#endif
 	CheckCmd(hmenu, IDM_VIEW_AUTO_SCALE_TOOLBAR, iAutoScaleToolbar);
 #if NP2_ENABLE_HIDPI_IMAGE_RESOURCE
 	CheckCmd(hmenu, IDM_VIEW_USE_LARGE_TOOLBAR, iAutoScaleToolbar > USER_DEFAULT_SCREEN_DPI);
@@ -4072,6 +4096,13 @@ LRESULT MsgCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 		SendWMSize(hwnd);
 		break;
 
+#if NP2_SUPPORT_MD_PREVIEW
+	case IDM_VIEW_MDPREVIEW:
+		EditPreview_Toggle();
+		MsgInitMenu(hwnd, 0, 0);
+		break;
+#endif
+
 	case IDM_VIEW_CUSTOMIZE_TOOLBAR:
 		SendMessage(hwndToolbar, TB_CUSTOMIZE, 0, 0);
 		break;
@@ -4844,6 +4875,9 @@ LRESULT MsgNotify(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 			++dwCurrentDocReversion;
 			UpdateStatusBarCacheLineColumn();
 			AutoSave_Start(false);
+#if NP2_SUPPORT_MD_PREVIEW
+			EditPreview_OnDocumentChanged();
+#endif
 			break;
 
 		case SCN_ZOOM:
@@ -6914,6 +6948,9 @@ bool FileLoad(FileLoadFlag loadFlag, LPCWSTR lpszFile) {
 		} else {
 			UpdateLineNumberWidth();
 		}
+#if NP2_SUPPORT_MD_PREVIEW
+		EditPreview_OnFileOpened();
+#endif
 
 		mruFile.Add(pszFile);
 		if (flagUseSystemMRU == TripleBoolean_True) {

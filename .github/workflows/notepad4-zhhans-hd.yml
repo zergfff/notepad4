@@ -1,0 +1,32 @@
+name: Notepad4 zh-Hans HD (AVX2)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: cmd
+
+jobs:
+  zhhans-hd-avx2:
+    name: Build zh-Hans HD AVX2
+    runs-on: windows-2022
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Update Version Hash
+      run: |
+        "c:/Program Files/Git/usr/bin/sed" -i "s/^\(.\+\)[0-9a-f]\{8\}\(.\+\)$/\1%GITHUB_SHA:~0,8%\2/gm" ./src/VersionRev.h ./matepath/src/VersionRev.h
+
+    - name: Build zh-Hans HD AVX2
+      run: |
+        python build\build_zhhans_hd.py
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: Notepad4_HD_zh-Hans_AVX2
+        path: 'build\Notepad4_HD_zh-Hans_AVX2_*.zip'
+        if-no-files-found: error
