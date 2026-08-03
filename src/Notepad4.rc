@@ -1834,6 +1834,7 @@ BEGIN
     IDT_FILE_LAUNCH         "Execute Document"
     IDT_VIEW_ALWAYSONTOP    "Always On Top"
     IDT_FILE_NEWWINDOW      "New Window"
+    IDM_VIEW_MDPREVIEW      "Markdown Preview"
 END
 
 STRINGTABLE

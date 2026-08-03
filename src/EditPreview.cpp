@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstddef>
+#include <cstdarg>
 #include <cwchar>
 #include <WebView2.h>
 
@@ -51,6 +52,43 @@
 #define MD_PREVIEW_ASSETS_HOST	L"appassets"
 
 static const WCHAR *MD_PREVIEW_WD_INI_KEY = L"MarkdownPreviewWidth";
+
+//=============================================================================
+// Logging: append a line to Notepad4_MDPreview.log next to the exe
+//=============================================================================
+static void EditPreview_Log(const char *fmt, ...) {
+	WCHAR exePath[MAX_PATH];
+	GetModuleFileName(nullptr, exePath, COUNTOF(exePath));
+	PathRemoveFileSpec(exePath);
+	WCHAR logPath[MAX_PATH + 32];
+	PathCombine(logPath, exePath, L"Notepad4_MDPreview.log");
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+	char buf[2048];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+
+	FILE *f = nullptr;
+	if (_wfopen_s(&f, logPath, L"a") == 0 && f != nullptr) {
+		fprintf(f, "[%02u:%02u:%02u.%03u] %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+		fclose(f);
+	}
+}
+
+// throttle the noisy scroll logging to keep the log readable
+static void EditPreview_LogScroll(const char *tag, double ratio) noexcept {
+	static DWORD lastTick = 0;
+	static double lastRatio = -1.0;
+	const DWORD now = GetTickCount();
+	if (now - lastTick > 500 || (lastRatio < 0.0 || ratio - lastRatio > 0.01 || lastRatio - ratio > 0.01)) {
+		EditPreview_Log("[scroll] %s ratio=%.4f", tag, ratio);
+		lastTick = now;
+		lastRatio = ratio;
+	}
+}
 
 static const WCHAR kPlaceholder[] = L"<html><head><meta charset=\"utf-8\"></head><body style=\"font-family:'Segoe UI','Microsoft YaHei';color:#888;margin:16px;\">Not a Markdown document.</body></html>";
 static const WCHAR kTooLarge[] = L"<html><head><meta charset=\"utf-8\"></head><body style=\"font-family:'Segoe UI','Microsoft YaHei';color:#888;margin:16px;\">Document too large for live preview.</body></html>";
@@ -171,6 +209,8 @@ static HWND g_hwndSplitter = nullptr;
 static ICoreWebView2Controller *g_controller = nullptr;
 static ICoreWebView2Controller2 *g_controller2 = nullptr;
 static ICoreWebView2 *g_webview = nullptr;
+static ICoreWebView2WebMessageReceivedEventHandler *g_messageHandler = nullptr;
+static EventRegistrationToken g_messageToken = {};
 static bool g_bInitialized = false;
 static bool g_bVisible = false;
 static bool g_bPendingLayout = false;
@@ -331,12 +371,14 @@ public:
 					} else if (g_dScrollRatio > 1.0) {
 						g_dScrollRatio = 1.0;
 					}
+					EditPreview_LogScroll("recv", g_dScrollRatio);
 					PostMessage(g_hwndMain, APPM_MDPREVIEW_SCROLL, 0, 0);
+				} else {
+					EditPreview_Log("[msg] unknown webview message '%ls'", p);
 				}
 				CoTaskMemFree(json);
 			}
 		}
-		Release();
 		return S_OK;
 	}
 };
@@ -398,6 +440,7 @@ void EditPreview_Init(HWND hwnd) noexcept {
 	g_hwndMain = hwnd;
 	g_iSplitWidth = IniGetInt(INI_SECTION_NAME_FLAGS, MD_PREVIEW_WD_INI_KEY, MD_PREVIEW_SPLIT_WIDTH);
 	g_iPreviewTheme = IniGetInt(INI_SECTION_NAME_FLAGS, L"MarkdownPreviewTheme", MDPreviewTheme_Auto);
+	EditPreview_Log("[init] hwnd=%p split=%d theme=%d", hwnd, g_iSplitWidth, g_iPreviewTheme);
 	EditPreview_CreateSplitter();
 }
 
@@ -407,6 +450,7 @@ void EditPreview_Init(HWND hwnd) noexcept {
 //
 //=============================================================================
 void EditPreview_OnDestroy() noexcept {
+	EditPreview_Log("[destroy] releasing WebView2");
 	if (g_uTimer != 0) {
 		KillTimer(g_hwndMain, ID_MDPREVIEWTIMER);
 		g_uTimer = 0;
@@ -415,6 +459,17 @@ void EditPreview_OnDestroy() noexcept {
 		DestroyWindow(g_hwndSplitter);
 		g_hwndSplitter = nullptr;
 	}
+	if (g_webview != nullptr) {
+		if (g_messageHandler != nullptr) {
+			g_webview->remove_WebMessageReceived(g_messageToken);
+		}
+		g_webview->Release();
+		g_webview = nullptr;
+	}
+	if (g_messageHandler != nullptr) {
+		g_messageHandler->Release();
+		g_messageHandler = nullptr;
+	}
 	if (g_controller != nullptr) {
 		g_controller->Release();
 		g_controller = nullptr;
@@ -422,10 +477,6 @@ void EditPreview_OnDestroy() noexcept {
 	if (g_controller2 != nullptr) {
 		g_controller2->Release();
 		g_controller2 = nullptr;
-	}
-	if (g_webview != nullptr) {
-		g_webview->Release();
-		g_webview = nullptr;
 	}
 	g_bInitialized = false;
 }
@@ -480,8 +531,10 @@ public:
 	}
 
 	HRESULT STDMETHODCALLTYPE Invoke(HRESULT result, ICoreWebView2Environment *env) override {
+		EditPreview_Log("[env] created result=0x%08X hwnd=%p", result, g_hwndMain);
 		// the window may be destroyed while WebView2 is still initializing
 		if (!IsWindow(g_hwndMain)) {
+			EditPreview_Log("[env] main window gone, aborting");
 			Release();
 			return S_OK;
 		}
@@ -513,10 +566,12 @@ public:
 				}
 
 				HRESULT STDMETHODCALLTYPE Invoke(HRESULT result2, ICoreWebView2Controller *controller) override {
+					EditPreview_Log("[ctrl] created result=0x%08X", result2);
 					if (SUCCEEDED(result2) && controller != nullptr) {
 						g_controller = controller;
 						g_controller->AddRef();	// keep our own reference
 						if (!IsWindow(g_hwndMain)) {
+							EditPreview_Log("[ctrl] main window gone, aborting");
 							g_controller->Release();
 							g_controller = nullptr;
 							Release();
@@ -544,7 +599,9 @@ public:
 								webview3->Release();
 							}
 							// receive "scroll:<ratio>" messages from the page for sync scrolling
-							g_webview->add_WebMessageReceived(new WebMessageHandler(), nullptr);
+							g_messageHandler = new WebMessageHandler();
+							const HRESULT hrMsg = g_webview->add_WebMessageReceived(g_messageHandler, &g_messageToken);
+							EditPreview_Log("[ctrl] add_WebMessageReceived hr=0x%08X", hrMsg);
 						}
 						if (SUCCEEDED(controller->QueryInterface(IID_PPV_ARGS(&g_controller2))) && g_controller2 != nullptr) {
 							g_controller2->put_DefaultBackgroundColor(EditPreview_GetDefaultBackgroundColor());
@@ -579,6 +636,7 @@ static void EditPreview_InitWebView() noexcept {
 		return;
 	}
 	g_bInitialized = true;
+	EditPreview_Log("[webview] initializing WebView2...");
 	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 	CreateCoreWebView2EnvironmentWithOptions(nullptr, nullptr, nullptr, new EnvCompletedHandler());
 }
@@ -695,6 +753,7 @@ static void EditPreview_Refresh() noexcept {
 
 	const Sci_Position len = SciCall_GetLength();
 	if (len <= 0 || len > MD_PREVIEW_MAX_SIZE) {
+		EditPreview_Log("[refresh] doc too large: %lld", static_cast<long long>(len));
 		EditPreview_ShowPage(kTooLarge);
 		return;
 	}
@@ -731,6 +790,7 @@ static void EditPreview_Refresh() noexcept {
 			pwsz[wlen] = L'\0';
 			BSTR bstr = SysAllocStringLen(pwsz, wlen);
 			if (bstr != nullptr) {
+				EditPreview_Log("[refresh] NavigateToString len=%lld html=%d", static_cast<long long>(len), wlen);
 				g_webview->NavigateToString(bstr);
 				SysFreeString(bstr);
 			}
@@ -804,6 +864,7 @@ void EditPreview_OnThemeChanged() noexcept {
 //=============================================================================
 void EditPreview_Toggle() noexcept {
 	g_bVisible = !g_bVisible;
+	EditPreview_Log("[toggle] visible=%d", static_cast<int>(g_bVisible));
 
 	if (g_bVisible) {
 		EditPreview_InitWebView();
@@ -874,6 +935,7 @@ static void EditPreview_SyncToPreview() noexcept {
 	}
 	WCHAR js[128];
 	swprintf(js, COUNTOF(js), L"window.scrollTo(0,%f*(document.documentElement.scrollHeight-window.innerHeight));", ratio);
+	EditPreview_LogScroll("send", ratio);
 	g_webview->ExecuteScript(js, nullptr);
 }
 
@@ -913,6 +975,7 @@ void EditPreview_SyncEditScroll() noexcept {
 	g_bSyncingScroll = true;
 	SciCall_SetFirstVisibleLine(line);
 	g_bSyncingScroll = false;
+	EditPreview_LogScroll("edit->line", static_cast<double>(line));
 }
 
 #endif // NP2_SUPPORT_MD_PREVIEW

@@ -27,9 +27,13 @@ backupMap = {}
 
 def backup_sources():
     global backupDir
+    global backupMap
     backupDir = os.path.join(tempfile.mkdtemp(prefix='zhhans_hd_'))
+    backupMap = {}
+    repoRoot = os.path.normpath(os.path.join(buildFolder, '..'))
     for path in (notepad4_config_h, matepath_config_h, notepad4_rc, matepath_rc):
-        target = os.path.join(backupDir, os.path.basename(os.path.dirname(path)) + '_' + os.path.basename(path))
+        rel = os.path.relpath(path, repoRoot).replace('\\', '_').replace('/', '_')
+        target = os.path.join(backupDir, rel)
         shutil.copyfile(path, target)
         backupMap[path] = target
 

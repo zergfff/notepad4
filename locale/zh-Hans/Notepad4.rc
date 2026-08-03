@@ -1834,6 +1834,7 @@ BEGIN
     IDT_FILE_LAUNCH         "运行文件"
     IDT_VIEW_ALWAYSONTOP    "始终置顶"
     IDT_FILE_NEWWINDOW      "新建窗口"
+    IDM_VIEW_MDPREVIEW      "Markdown 预览"
 END
 
 STRINGTABLE
