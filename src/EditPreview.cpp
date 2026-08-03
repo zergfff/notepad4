@@ -218,20 +218,42 @@ static const char kRenderScript[] = R"HTML(<script>
         renderMarkdown(src);
     }
 
-    window.previewAnchor = function (i) {
+    window.previewAnchor = function (i, pos) {
         var el = document.getElementById('hx-' + i);
-        if (el) el.scrollIntoView({ block: 'start' });
+        if (!el) return;
+        if (pos === undefined || pos < 0 || pos > 1) {
+            el.scrollIntoView({ block: 'start' });
+            return;
+        }
+        var target = el.offsetTop;
+        var el2 = document.getElementById('hx-' + (i + 1));
+        if (el2) target += pos * (el2.offsetTop - el.offsetTop);
+        window.scrollTo(0, target - 16);
     };
-    function topHeadingIndex() {
+    function topHeadingRange() {
         var els = document.querySelectorAll('[id^="hx-"]');
         var top = window.scrollY + 16;
-        var best = -1;
+        var prev = -1, next = -1;
         for (var i = 0; i < els.length; i++) {
             var idx = parseInt(els[i].id.substring(3), 10);
-            if (els[i].offsetTop <= top) best = idx;
-            else break;
+            if (els[i].offsetTop <= top) prev = idx;
+            else { next = idx; break; }
         }
-        return best;
+        if (prev >= 0) {
+            var pe = document.getElementById('hx-' + prev);
+            var pos = 0;
+            if (next >= 0) {
+                var ne = document.getElementById('hx-' + next);
+                var span = ne.offsetTop - pe.offsetTop;
+                if (span > 0) {
+                    pos = (top - pe.offsetTop) / span;
+                    if (pos < 0) pos = 0;
+                    else if (pos > 1) pos = 1;
+                }
+            }
+            return prev + ':' + pos.toFixed(4);
+        }
+        return null;
     }
     function syncScroll() {
         var doc = document.documentElement;
@@ -246,9 +268,9 @@ static const char kRenderScript[] = R"HTML(<script>
                 window.chrome.webview.postMessage('scroll:1');
                 return;
             }
-            var hi = topHeadingIndex();
-            if (hi >= 0) {
-                window.chrome.webview.postMessage('anchor:' + hi);
+            var rng = topHeadingRange();
+            if (rng !== null) {
+                window.chrome.webview.postMessage('range:' + rng);
             } else {
                 window.chrome.webview.postMessage('scroll:' + (y / max).toFixed(4));
             }
@@ -292,6 +314,7 @@ static int g_lastCx = 0;
 static int g_lastCy = 0;
 static double g_dScrollRatio = 0.0;
 static int g_iAnchorIndex = -1;
+static double g_dAnchorPos = 0.0;
 static bool g_bPageReady = false;
 static bool g_bAnchorValid = true;
 static int g_iJsHeadingCount = -1;
@@ -450,8 +473,23 @@ public:
 					PostMessage(g_hwndMain, APPM_MDPREVIEW_SCROLL, 0, 0);
 				} else if (WcsStartsWith(p, L"anchor:") && IsWindow(g_hwndMain)) {
 					g_iAnchorIndex = _wtoi(p + CSTRLEN(L"anchor:"));
+					g_dAnchorPos = 0.0;
 					EditPreview_Log("[msg] anchor=%d", g_iAnchorIndex);
 					PostMessage(g_hwndMain, APPM_MDPREVIEW_ANCHOR, 0, 0);
+				} else if (WcsStartsWith(p, L"range:") && IsWindow(g_hwndMain)) {
+					// format: range:<index>:<pos>
+					const WCHAR *colon = StrChrW(p + CSTRLEN(L"range:"), L':');
+					if (colon != nullptr) {
+						g_iAnchorIndex = _wtoi(p + CSTRLEN(L"range:"));
+						g_dAnchorPos = wcstod(colon + 1, nullptr);
+						if (g_dAnchorPos < 0.0) {
+							g_dAnchorPos = 0.0;
+						} else if (g_dAnchorPos > 1.0) {
+							g_dAnchorPos = 1.0;
+						}
+						EditPreview_Log("[msg] range=%d pos=%.3f", g_iAnchorIndex, g_dAnchorPos);
+						PostMessage(g_hwndMain, APPM_MDPREVIEW_ANCHOR, 0, 0);
+					}
 				} else if (WcsStartsWith(p, L"headings:") && IsWindow(g_hwndMain)) {
 					// the preview reports how many headings it tagged; if this
 					// does not match our scan, fall back to proportional sync
@@ -1144,7 +1182,8 @@ static void EditPreview_SyncToPreview() noexcept {
 	}
 
 	// anchor mode: scroll the preview to the nearest heading at/above the top
-	// line, but only when the editor/preview heading lists are in agreement
+	// line, interpolated between that heading and the next one so long bodies
+	// between headings stay roughly aligned
 	if (g_bAnchorValid && !g_headings.empty()) {
 		size_t lo = 0, hi = g_headings.size();
 		while (lo < hi) {
@@ -1156,10 +1195,23 @@ static void EditPreview_SyncToPreview() noexcept {
 			}
 		}
 		if (lo > 0) {
-			--lo;
-			WCHAR js[64];
-			wsprintf(js, L"window.previewAnchor(%d);", static_cast<int>(lo));
-			EditPreview_LogScroll("anchor->", static_cast<double>(lo));
+			--lo;	// lo = index of the nearest heading at/above first
+			double pos = 0.0;
+			if (lo + 1 < g_headings.size()) {
+				const Sci_Line lineL = g_headings[lo];
+				const Sci_Line span = g_headings[lo + 1] - lineL;
+				if (span > 0) {
+					pos = static_cast<double>(first - lineL) / span;
+					if (pos < 0.0) {
+						pos = 0.0;
+					} else if (pos > 1.0) {
+						pos = 1.0;
+					}
+				}
+			}
+			WCHAR js[96];
+			swprintf(js, COUNTOF(js), L"window.previewAnchor(%d,%f);", static_cast<int>(lo), pos);
+			EditPreview_LogScroll("anchor->", static_cast<double>(lo) + pos);
 			g_webview->ExecuteScript(js, nullptr);
 			return;
 		}
@@ -1236,7 +1288,16 @@ void EditPreview_SyncEditAnchor() noexcept {
 	if (g_iAnchorIndex < 0 || g_iAnchorIndex >= static_cast<int>(g_headings.size())) {
 		return;
 	}
-	const Sci_Line line = g_headings[g_iAnchorIndex];
+	Sci_Line line = g_headings[g_iAnchorIndex];
+	if (g_iAnchorIndex + 1 < static_cast<int>(g_headings.size())) {
+		const Sci_Line span = g_headings[g_iAnchorIndex + 1] - line;
+		if (span > 0) {
+			line += static_cast<Sci_Line>(g_dAnchorPos * span);
+		}
+	}
+	if (line < 0) {
+		line = 0;
+	}
 	g_bSyncingScroll = true;
 	SciCall_SetFirstVisibleLine(line);
 	g_bSyncingScroll = false;
