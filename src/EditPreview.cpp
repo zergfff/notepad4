@@ -152,7 +152,6 @@ pre.mermaid { text-align: center; }
 static const char kRenderScript[] = R"HTML(<script>
 (function () {
     var md = '';
-    var hx = 0;
 
     function ensureMermaid(cb) {
         if (typeof mermaid !== 'undefined') { cb(); return; }
@@ -177,27 +176,52 @@ static const char kRenderScript[] = R"HTML(<script>
         if (!body) return;
         md = source;
         if (typeof marked === 'undefined') { body.textContent = md; return; }
-        // Tag ATX headings (# ) with a stable sequential id that matches the
-        // editor's heading scan, so anchor indices align. Setext headings and
-        // headings inside blockquotes are left untagged.
+        // Tag anchor lines with a stable sequential id matching the editor's
+        // block scan: headings are rewritten to <hN id="anc-N">, and the
+        // first line of paragraphs/quotes/lists gets a leading <span id="anc-N">.
+        // Indented code blocks and table rows are skipped, as are fenced code.
         var srcLines = md.split('\n');
-        hx = 0;
+        var anc = 0;
+        var inFence = false;
+        var blockOpen = false;
         for (var i = 0; i < srcLines.length; i++) {
-            // [^\r\n]+ instead of .+ because '.' does not match CR, which is
-            // present on every line of CRLF files
-            var m = /^(#{1,6})[ \t]+([^\r\n]+)/.exec(srcLines[i]);
-            if (m) {
-                var level = m[1].length;
-                var inner = marked.parseInline(m[2]);
-                srcLines[i] = '<h' + level + ' id="hx-' + (hx++) + '">' + inner + '</h' + level + '>';
+            var line = srcLines[i];
+            if (/^(`{3,}|~{3,})/.test(line)) {
+                inFence = !inFence;
+                blockOpen = false;
+                continue;
+            }
+            if (inFence) { continue; }
+            if (/^\s*$/.test(line)) { blockOpen = false; continue; }
+            var hm = /^(#{1,6})[ \t]+([^\r\n]+)/.exec(line);
+            if (hm) {
+                var level = hm[1].length;
+                srcLines[i] = '<h' + level + ' id="anc-' + (anc++) + '">' + marked.parseInline(hm[2]) + '</h' + level + '>';
+                blockOpen = false;
+                continue;
+            }
+            if (!blockOpen) {
+                var isIndented = /^( {4}|\t)/.test(line);
+                var isTable = /^\|/.test(line);
+                if (!isIndented && !isTable) {
+                    // paragraphs, blockquotes and list items: put the span after
+                    // the leading marker so the markdown structure is preserved
+                    var lm = /^(\s*[>*+-]\s+|\s*\d+[.)]\s+)/.exec(line);
+                    if (lm) {
+                        srcLines[i] = line.slice(0, lm[0].length) + '<span id="anc-' + (anc++) + '"></span>' + line.slice(lm[0].length);
+                    } else {
+                        srcLines[i] = '<span id="anc-' + (anc++) + '"></span>' + line;
+                    }
+                }
+                blockOpen = true;
             }
         }
         var html = marked.parse(srcLines.join('\n'));
         body.innerHTML = html;
         if (window.chrome && window.chrome.webview) {
-            // report how many headings were tagged so the editor can verify
-            // the anchor indices are in agreement and fall back if not
-            window.chrome.webview.postMessage('headings:' + hx);
+            // report how many anchors were tagged so the editor can verify the
+            // indices are in agreement and fall back to proportional sync if not
+            window.chrome.webview.postMessage('headings:' + anc);
         }
         var mermaidBlocks = document.querySelectorAll('pre > code.language-mermaid');
         if (mermaidBlocks.length > 0) {
@@ -219,31 +243,31 @@ static const char kRenderScript[] = R"HTML(<script>
     }
 
     window.previewAnchor = function (i, pos) {
-        var el = document.getElementById('hx-' + i);
+        var el = document.getElementById('anc-' + i);
         if (!el) return;
         if (pos === undefined || pos < 0 || pos > 1) {
             el.scrollIntoView({ block: 'start' });
             return;
         }
         var target = el.offsetTop;
-        var el2 = document.getElementById('hx-' + (i + 1));
+        var el2 = document.getElementById('anc-' + (i + 1));
         if (el2) target += pos * (el2.offsetTop - el.offsetTop);
         window.scrollTo(0, target - 16);
     };
-    function topHeadingRange() {
-        var els = document.querySelectorAll('[id^="hx-"]');
+    function topAnchorRange() {
+        var els = document.querySelectorAll('[id^="anc-"]');
         var top = window.scrollY + 16;
         var prev = -1, next = -1;
         for (var i = 0; i < els.length; i++) {
-            var idx = parseInt(els[i].id.substring(3), 10);
+            var idx = parseInt(els[i].id.substring(4), 10);
             if (els[i].offsetTop <= top) prev = idx;
             else { next = idx; break; }
         }
         if (prev >= 0) {
-            var pe = document.getElementById('hx-' + prev);
+            var pe = document.getElementById('anc-' + prev);
             var pos = 0;
             if (next >= 0) {
-                var ne = document.getElementById('hx-' + next);
+                var ne = document.getElementById('anc-' + next);
                 var span = ne.offsetTop - pe.offsetTop;
                 if (span > 0) {
                     pos = (top - pe.offsetTop) / span;
@@ -268,7 +292,7 @@ static const char kRenderScript[] = R"HTML(<script>
                 window.chrome.webview.postMessage('scroll:1');
                 return;
             }
-            var rng = topHeadingRange();
+            var rng = topAnchorRange();
             if (rng !== null) {
                 window.chrome.webview.postMessage('range:' + rng);
             } else {
@@ -914,8 +938,10 @@ static void EditPreview_ScanHeadings() noexcept {
 		return;
 	}
 	// fetch the whole document once and scan in memory instead of one
-	// SendMessage per line. Only ATX headings are collected, matching the
-	// headings the preview tags, so the anchor indices line up.
+	// SendMessage per line. Anchor lines are heading lines plus the first
+	// line of each non-empty block (paragraph, quote, list); indented code
+	// blocks and table rows are skipped so the indices line up with the
+	// anchors the preview tags.
 	char *text = static_cast<char *>(NP2HeapAlloc(static_cast<size_t>(len) + 1));
 	if (text == nullptr) {
 		return;
@@ -926,6 +952,8 @@ static void EditPreview_ScanHeadings() noexcept {
 	const char *p = text;
 	Sci_Line line = 0;
 	double acc = 0.0;
+	bool inFence = false;
+	bool blockOpen = false;
 	while (p < end) {
 		const char *lineStart = p;
 		while (p < end && *p != '\n') {
@@ -933,9 +961,30 @@ static void EditPreview_ScanHeadings() noexcept {
 		}
 		const char *lineEnd = p;
 
-		// estimate how tall this line renders in the preview
+		// fenced code block marker: ``` or ~~~ (>= 3 at start of line)
+		bool fenceLine = false;
+		if (lineEnd - lineStart >= 3) {
+			const char fc = *lineStart;
+			if (fc == '`' || fc == '~') {
+				int cnt = 0;
+				for (const char *c = lineStart; c < lineEnd; ++c) {
+					if (*c != fc) {
+						break;
+					}
+					++cnt;
+				}
+				if (cnt >= 3) {
+					fenceLine = true;
+				}
+			}
+		}
+
 		double weight = 1.0;
-		{
+		if (fenceLine) {
+			inFence = !inFence;
+			blockOpen = false;
+			weight = 2.5;
+		} else if (!inFence) {
 			bool empty = true;
 			for (const char *c = lineStart; c < lineEnd; ++c) {
 				if (*c != ' ' && *c != '\t' && *c != '\r') {
@@ -944,38 +993,67 @@ static void EditPreview_ScanHeadings() noexcept {
 				}
 			}
 			if (empty) {
+				blockOpen = false;
 				weight = 0.3;
-			} else if (*lineStart == '|') {
-				weight = 2.5;	// table row
-			} else if (*lineStart == ' ' || *lineStart == '\t') {
-				weight = 2.5;	// indented code / block
-			} else if (*lineStart == '>') {
-				weight = 1.3;	// blockquote
-			} else if (*lineStart == '-' || *lineStart == '*' || (*lineStart >= '0' && *lineStart <= '9')) {
-				weight = 1.6;	// list item
-			} else if (*lineStart == '#') {
-				weight = 2.0;	// heading
+			} else {
+				const char fc = *lineStart;
+				if (fc == ' ' || fc == '\t') {
+					weight = 2.5;	// indented code
+				} else if (fc == '|') {
+					weight = 2.5;	// table row
+				} else if (fc == '>') {
+					weight = 1.3;	// blockquote
+				} else if (fc == '-' || fc == '*' || (fc >= '0' && fc <= '9')) {
+					weight = 1.6;	// list item
+				} else if (fc == '#') {
+					weight = 2.0;	// heading
+				}
+				// ATX heading?
+				bool isHeading = false;
+				if (fc == '#') {
+					const char *q = lineStart;
+					int level = 0;
+					while (level < 6 && q < lineEnd && *q == '#') {
+						++level;
+						++q;
+					}
+					if (level >= 1 && q < lineEnd && (*q == ' ' || *q == '\t')) {
+						const char *t = q;
+						while (t < lineEnd && (*t == ' ' || *t == '\t')) {
+							++t;
+						}
+						isHeading = (t < lineEnd);
+					}
+				}
+				if (isHeading) {
+					g_headings.push_back(line);
+					blockOpen = false;
+				} else {
+					// indented code block: 4+ leading spaces or a tab
+					bool isIndented = (fc == '\t');
+					if (!isIndented && fc == ' ' && (lineEnd - lineStart) >= 4) {
+						bool allSp = true;
+						for (int k = 0; k < 4; ++k) {
+							if (lineStart[k] != ' ') {
+								allSp = false;
+								break;
+							}
+						}
+						isIndented = allSp;
+					}
+					const bool isTable = (fc == '|');
+					if (!blockOpen && !isIndented && !isTable) {
+						g_headings.push_back(line);
+					}
+					blockOpen = true;
+				}
 			}
+		} else {
+			weight = 2.5;	// inside fenced code
 		}
+
 		acc += weight;
 		g_contentPrefix.push_back(acc);
-
-		// ATX heading: ^#{1,6}\s+<non-empty content>
-		const char *q = lineStart;
-		int level = 0;
-		while (level < 6 && q < lineEnd && *q == '#') {
-			++level;
-			++q;
-		}
-		if (level >= 1 && q < lineEnd && (*q == ' ' || *q == '\t')) {
-			const char *t = q;
-			while (t < lineEnd && (*t == ' ' || *t == '\t')) {
-				++t;
-			}
-			if (t < lineEnd) {
-				g_headings.push_back(line);
-			}
-		}
 
 		if (p < end) {
 			++p;	// skip the '\n'
