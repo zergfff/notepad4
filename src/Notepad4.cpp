@@ -1252,6 +1252,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
 	case APPM_MDPREVIEW_SCROLL:
 		EditPreview_SyncEditScroll();
 		break;
+
+	case APPM_MDPREVIEW_ANCHOR:
+		EditPreview_SyncEditAnchor();
+		break;
 #endif
 
 	case WM_COPYDATA: {

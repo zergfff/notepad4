@@ -20,6 +20,7 @@
 #include <objbase.h>
 #include <oleauto.h>
 #include <string>
+#include <vector>
 #include <cstdlib>
 #include <cstdio>
 #include <cstddef>
@@ -103,7 +104,6 @@ static const char kHtmlHead[] = R"HTML(<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://appassets/marked.min.js"></script>
-<script src="https://appassets/mermaid.min.js"></script>
 <style>
 :root {
   --bg: #ffffff; --fg: #1f2328; --border: #d8dee4; --code-bg: #f6f8fa;
@@ -151,45 +151,98 @@ pre.mermaid { text-align: center; }
 
 static const char kRenderScript[] = R"HTML(<script>
 (function () {
-    function render() {
+    var md = '';
+    var hx = 0;
+
+    function ensureMermaid(cb) {
+        if (typeof mermaid !== 'undefined') { cb(); return; }
+        var s = document.createElement('script');
+        s.src = 'https://appassets/mermaid.min.js';
+        s.onload = cb;
+        s.onerror = cb;
+        document.head.appendChild(s);
+    }
+
+    function applyMermaid() {
+        var attr = document.body.getAttribute('data-theme');
+        var dark = attr === 'dark' || (attr === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        try {
+            mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default', securityLevel: 'loose' });
+            mermaid.run();
+        } catch (e) { /* ignore render errors */ }
+    }
+
+    function renderMarkdown(source) {
         var body = document.getElementById('md-body');
         if (!body) return;
-        var raw = document.getElementById('md-source');
-        var md = raw ? JSON.parse(raw.textContent) : '';
-        if (typeof marked === 'undefined') {
-            body.textContent = md;
-            return;
-        }
+        md = source;
+        if (typeof marked === 'undefined') { body.textContent = md; return; }
+        var renderer = new marked.Renderer();
+        hx = 0;
+        renderer.heading = function (text, level, rawText, slugger) {
+            return '<h' + level + ' data-hx="' + (hx++) + '">' + text + '</h' + level + '>';
+        };
+        marked.setOptions({ renderer: renderer });
         var html = marked.parse(md);
         body.innerHTML = html;
-
-        document.querySelectorAll('pre > code.language-mermaid').forEach(function (code) {
-            var pre = code.parentNode;
-            pre.classList.add('mermaid');
-            pre.textContent = code.textContent;
-            pre.removeChild(code);
-        });
-        if (typeof mermaid !== 'undefined') {
-            var attr = document.body.getAttribute('data-theme');
-            var dark = attr === 'dark' || (attr === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-            try {
-                mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default', securityLevel: 'loose' });
-                mermaid.run();
-            } catch (e) { /* ignore render errors */ }
+        var mermaidBlocks = document.querySelectorAll('pre > code.language-mermaid');
+        if (mermaidBlocks.length > 0) {
+            mermaidBlocks.forEach(function (code) {
+                var pre = code.parentNode;
+                pre.classList.add('mermaid');
+                pre.textContent = code.textContent;
+                pre.removeChild(code);
+            });
+            ensureMermaid(applyMermaid);
         }
+    }
+    window.renderMarkdown = renderMarkdown;
+
+    function firstRender() {
+        var raw = document.getElementById('md-source');
+        var src = raw ? JSON.parse(raw.textContent) : '';
+        renderMarkdown(src);
+    }
+
+    window.previewAnchor = function (i) {
+        var el = document.querySelector('[data-hx="' + i + '"]');
+        if (el) el.scrollIntoView({ block: 'start' });
+    };
+    function topHeadingIndex() {
+        var els = document.querySelectorAll('[data-hx]');
+        var top = window.scrollY + 16;
+        var best = -1;
+        for (var i = 0; i < els.length; i++) {
+            if (els[i].offsetTop <= top) best = parseInt(els[i].getAttribute('data-hx'), 10);
+            else break;
+        }
+        return best;
     }
     function syncScroll() {
         var doc = document.documentElement;
         var max = doc.scrollHeight - window.innerHeight;
-        var r = max > 0 ? (window.scrollY / max) : 0;
+        var y = window.scrollY;
         if (window.chrome && window.chrome.webview) {
-            window.chrome.webview.postMessage('scroll:' + r.toFixed(4));
+            if (y <= 0) {
+                window.chrome.webview.postMessage('scroll:0');
+                return;
+            }
+            if (max <= 0 || y >= max - 2) {
+                window.chrome.webview.postMessage('scroll:1');
+                return;
+            }
+            var hi = topHeadingIndex();
+            if (hi >= 0) {
+                window.chrome.webview.postMessage('anchor:' + hi);
+            } else {
+                window.chrome.webview.postMessage('scroll:' + (y / max).toFixed(4));
+            }
         }
     }
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', render);
+        document.addEventListener('DOMContentLoaded', firstRender);
     } else {
-        render();
+        firstRender();
     }
     window.addEventListener('scroll', syncScroll, { passive: true });
 })();
@@ -223,6 +276,10 @@ static int g_lastY = 0;
 static int g_lastCx = 0;
 static int g_lastCy = 0;
 static double g_dScrollRatio = 0.0;
+static int g_iAnchorIndex = -1;
+static bool g_bPageReady = false;
+// heading lines in document order (1-based Sci_Line), rebuilt on refresh
+static std::vector<Sci_Line> g_headings;
 
 //=============================================================================
 // forward declarations
@@ -231,6 +288,7 @@ static void EditPreview_ApplyLayout() noexcept;
 static void EditPreview_Refresh() noexcept;
 static void EditPreview_SaveSplitWidth() noexcept;
 static void EditPreview_SyncToPreview() noexcept;
+static void EditPreview_RequestRelayout() noexcept;
 COREWEBVIEW2_COLOR EditPreview_GetDefaultBackgroundColor() noexcept;
 
 //=============================================================================
@@ -306,7 +364,7 @@ LRESULT CALLBACK EditPreview_SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LP
 			g_bDragging = false;
 			ReleaseCapture();
 			EditPreview_SaveSplitWidth();
-			PostMessage(g_hwndMain, WM_SIZE, SIZE_RESTORED, MAKELPARAM(g_lastCx, g_lastCy));
+			EditPreview_RequestRelayout();
 		}
 		return 0;
 
@@ -373,6 +431,10 @@ public:
 					}
 					EditPreview_LogScroll("recv", g_dScrollRatio);
 					PostMessage(g_hwndMain, APPM_MDPREVIEW_SCROLL, 0, 0);
+				} else if (WcsStartsWith(p, L"anchor:") && IsWindow(g_hwndMain)) {
+					g_iAnchorIndex = _wtoi(p + CSTRLEN(L"anchor:"));
+					EditPreview_Log("[msg] anchor=%d", g_iAnchorIndex);
+					PostMessage(g_hwndMain, APPM_MDPREVIEW_ANCHOR, 0, 0);
 				} else {
 					EditPreview_Log("[msg] unknown webview message '%ls'", p);
 				}
@@ -611,7 +673,7 @@ public:
 							g_bPendingLayout = false;
 							EditPreview_ApplyLayout();
 							// re-layout the whole window now that the pane is ready
-							PostMessage(g_hwndMain, WM_SIZE, SIZE_RESTORED, MAKELPARAM(g_lastCx, g_lastCy));
+							EditPreview_RequestRelayout();
 						}
 						EditPreview_Refresh();
 					}
@@ -677,6 +739,21 @@ static void EditPreview_ApplyLayout() noexcept {
 
 //=============================================================================
 //
+// EditPreview_RequestRelayout()
+//
+//   Post a WM_SIZE with the real client size so MsgSize recomputes the
+//   layout. The stored g_lastCx/g_lastCy are already reduced by the toolbar
+//   and statusbar heights, so reusing them would shrink the pane each time.
+//
+//=============================================================================
+static void EditPreview_RequestRelayout() noexcept {
+	RECT rc;
+	GetClientRect(g_hwndMain, &rc);
+	PostMessage(g_hwndMain, WM_SIZE, SIZE_RESTORED, MAKELPARAM(rc.right, rc.bottom));
+}
+
+//=============================================================================
+//
 // EditPreview_OnSize()
 //
 //   Returns the editor pane width for the given client area.
@@ -725,11 +802,112 @@ static void EditPreview_ShowPage(LPCWSTR html) noexcept {
 	if (g_webview == nullptr) {
 		return;
 	}
+	g_bPageReady = false;
 	BSTR bstr = SysAllocString(html);
 	if (bstr != nullptr) {
 		g_webview->NavigateToString(bstr);
 		SysFreeString(bstr);
 	}
+}
+
+//=============================================================================
+//
+// EditPreview_ExecuteScript()
+//
+//   Run a UTF-8 script string in the preview page.
+//
+//=============================================================================
+static void EditPreview_ExecuteScript(const std::string &script) noexcept {
+	if (g_webview == nullptr) {
+		return;
+	}
+	const int wlen = MultiByteToWideChar(CP_UTF8, 0, script.data(), static_cast<int>(script.size()), nullptr, 0);
+	if (wlen <= 0) {
+		return;
+	}
+	std::wstring ws;
+	ws.resize(static_cast<size_t>(wlen));
+	MultiByteToWideChar(CP_UTF8, 0, script.data(), static_cast<int>(script.size()), &ws[0], wlen);
+	g_webview->ExecuteScript(ws.c_str(), nullptr);
+}
+
+//=============================================================================
+//
+// EditPreview_ScanHeadings()
+//
+//   Collect the line numbers of Markdown headings (ATX and setext) in
+//   document order, matching the headings rendered by marked so that the
+//   preview can be anchored to the same index.
+//
+//=============================================================================
+static void EditPreview_ScanHeadings() noexcept {
+	g_headings.clear();
+	const Sci_Position len = SciCall_GetLength();
+	if (len <= 0) {
+		return;
+	}
+	// fetch the whole document once and scan in memory instead of one
+	// SendMessage per line
+	char *text = static_cast<char *>(NP2HeapAlloc(static_cast<size_t>(len) + 1));
+	if (text == nullptr) {
+		return;
+	}
+	SciCall_GetText(len + 1, text);
+
+	const char *end = text + len;
+	const char *p = text;
+	Sci_Line line = 0;
+	while (p < end) {
+		const char *lineStart = p;
+		while (p < end && *p != '\n') {
+			++p;
+		}
+		const char *lineEnd = p;
+
+		bool isHeading = false;
+		// ATX heading: ^#{1,6}\s
+		const char *q = lineStart;
+		int level = 0;
+		while (level < 6 && q < lineEnd && *q == '#') {
+			++level;
+			++q;
+		}
+		if (level >= 1 && q < lineEnd && (*q == ' ' || *q == '\t')) {
+			isHeading = true;
+		}
+		if (!isHeading && lineEnd > lineStart && p < end) {
+			// setext heading: next line is all '=' or all '-'
+			const char *nstart = p + 1;
+			const char *n = nstart;
+			while (n < end && *n != '\n') {
+				++n;
+			}
+			bool eq = true, dash = true;
+			int hasEq = 0, hasDash = 0;
+			for (const char *c = nstart; c < n; ++c) {
+				if (*c == '=') {
+					++hasEq;
+				} else if (*c == '-') {
+					++hasDash;
+				} else if (*c != ' ' && *c != '\t' && *c != '\r') {
+					eq = dash = false;
+				}
+			}
+			if ((hasEq > 0 && eq) || (hasDash > 0 && dash)) {
+				isHeading = true;
+				p = n;
+			}
+		}
+		if (isHeading) {
+			g_headings.push_back(line);
+		}
+
+		if (p < end) {
+			++p;	// skip the '\n'
+		}
+		++line;
+	}
+	NP2HeapFree(text);
 }
 
 //=============================================================================
@@ -752,6 +930,7 @@ static void EditPreview_Refresh() noexcept {
 	}
 
 	const Sci_Position len = SciCall_GetLength();
+	EditPreview_ScanHeadings();
 	if (len <= 0 || len > MD_PREVIEW_MAX_SIZE) {
 		EditPreview_Log("[refresh] doc too large: %lld", static_cast<long long>(len));
 		EditPreview_ShowPage(kTooLarge);
@@ -763,6 +942,20 @@ static void EditPreview_Refresh() noexcept {
 		return;
 	}
 	SciCall_GetText(len + 1, pText);
+
+	if (g_bPageReady) {
+		// incremental update: re-render the content in place, no full page
+		// navigation, so marked/mermaid are not reloaded on every keystroke.
+		std::string js;
+		js.reserve(static_cast<size_t>(len) * 2 + 64);
+		js += "window.renderMarkdown(";
+		JsonEscapeAppend(pText, static_cast<size_t>(len), js);
+		js += ");";
+		NP2HeapFree(pText);
+		EditPreview_Log("[refresh] incremental len=%lld", static_cast<long long>(len));
+		EditPreview_ExecuteScript(js);
+		return;
+	}
 
 	std::string html;
 	html.reserve(static_cast<size_t>(len) * 2 + CSTRLEN(kHtmlHead) + CSTRLEN(kRenderScript) + CSTRLEN(kHtmlTail) + 256);
@@ -797,6 +990,7 @@ static void EditPreview_Refresh() noexcept {
 			NP2HeapFree(pwsz);
 		}
 	}
+	g_bPageReady = true;
 }
 
 //=============================================================================
@@ -881,7 +1075,7 @@ void EditPreview_Toggle() noexcept {
 	}
 
 	// re-layout the editor window
-	PostMessage(g_hwndMain, WM_SIZE, SIZE_RESTORED, MAKELPARAM(g_lastCx, g_lastCy));
+	EditPreview_RequestRelayout();
 }
 
 //=============================================================================
@@ -906,6 +1100,9 @@ void EditPreview_SetTheme(int theme) noexcept {
 		g_iPreviewTheme = theme;
 		IniSetInt(INI_SECTION_NAME_FLAGS, L"MarkdownPreviewTheme", theme);
 		if (g_bVisible) {
+			// the theme is applied via <body data-theme>, which the incremental
+			// update cannot change, so force a full page reload
+			g_bPageReady = false;
 			EditPreview_Refresh();
 		}
 	}
@@ -927,6 +1124,43 @@ static void EditPreview_SyncToPreview() noexcept {
 		return;
 	}
 	const Sci_Line first = SciCall_GetFirstVisibleLine();
+
+	// top of the document -> preview top
+	if (first <= 0) {
+		g_webview->ExecuteScript(L"window.scrollTo(0,0);", nullptr);
+		EditPreview_LogScroll("top->", 0);
+		return;
+	}
+	// bottom of the document -> preview bottom (aligned end)
+	const Sci_Line page = static_cast<Sci_Line>(SciCall(SCI_LINESONSCREEN, 0, 0));
+	if (page > 0 && first + page >= total) {
+		g_webview->ExecuteScript(L"window.scrollTo(0,document.documentElement.scrollHeight);", nullptr);
+		EditPreview_LogScroll("bottom->", 1);
+		return;
+	}
+
+	// anchor mode: scroll the preview to the nearest heading at/above the top line
+	if (!g_headings.empty()) {
+		size_t lo = 0, hi = g_headings.size();
+		while (lo < hi) {
+			const size_t mid = (lo + hi) / 2;
+			if (g_headings[mid] <= first) {
+				lo = mid + 1;
+			} else {
+				hi = mid;
+			}
+		}
+		if (lo > 0) {
+			--lo;
+			WCHAR js[64];
+			wsprintf(js, L"window.previewAnchor(%d);", static_cast<int>(lo));
+			EditPreview_LogScroll("anchor->", static_cast<double>(lo));
+			g_webview->ExecuteScript(js, nullptr);
+			return;
+		}
+	}
+
+	// fallback: proportional scroll
 	double ratio = static_cast<double>(first) / total;
 	if (ratio < 0.0) {
 		ratio = 0.0;
@@ -976,6 +1210,28 @@ void EditPreview_SyncEditScroll() noexcept {
 	SciCall_SetFirstVisibleLine(line);
 	g_bSyncingScroll = false;
 	EditPreview_LogScroll("edit->line", static_cast<double>(line));
+}
+
+//=============================================================================
+//
+// EditPreview_SyncEditAnchor()
+//
+//   Called when the preview pane lands on a heading (APPM_MDPREVIEW_ANCHOR).
+//   Scrolls the editor to that heading line.
+//
+//=============================================================================
+void EditPreview_SyncEditAnchor() noexcept {
+	if (!g_bVisible || g_bSyncingScroll) {
+		return;
+	}
+	if (g_iAnchorIndex < 0 || g_iAnchorIndex >= static_cast<int>(g_headings.size())) {
+		return;
+	}
+	const Sci_Line line = g_headings[g_iAnchorIndex];
+	g_bSyncingScroll = true;
+	SciCall_SetFirstVisibleLine(line);
+	g_bSyncingScroll = false;
+	EditPreview_Log("[anchor] edit->line %lld", static_cast<long long>(line));
 }
 
 #endif // NP2_SUPPORT_MD_PREVIEW
