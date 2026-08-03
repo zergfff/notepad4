@@ -142,6 +142,14 @@ def make_zip(app_version):
     shutil.copyfile(notepad4_exe, os.path.join(zipDir, 'Notepad4.exe'))
     shutil.copyfile(matepath_exe, os.path.join(zipDir, 'matepath.exe'))
 
+    # Markdown preview assets, loaded from the Notepad4.exe folder via the
+    # "appassets" virtual host in WebView2.
+    jsDir = os.path.join(buildFolder, '..', 'webview2', 'js')
+    for js in ('marked.min.js', 'mermaid.min.js'):
+        src = os.path.join(jsDir, js)
+        if os.path.isfile(src):
+            shutil.copyfile(src, os.path.join(zipDir, js))
+
     name = f'Notepad4_HD_zh-Hans_AVX2_{app_version}.zip'
     out = os.path.join(buildFolder, name)
     if os.path.exists(out):

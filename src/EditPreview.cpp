@@ -5,8 +5,10 @@
 * EditPreview.cpp
 *   Markdown live preview pane (WebView2)
 *
-* Convert the current Markdown document to HTML with cmark and render it
-* inside a WebView2 control in a split view on the right side.
+* The current Markdown document is rendered inside a WebView2 control in a
+* split view on the right side. Rendering is done in JavaScript by marked
+* (GFM support) and mermaid (diagrams), which are loaded from the virtual
+* host "appassets" that maps to the folder of Notepad4.exe.
 *
 ******************************************************************************/
 #include <windows.h>
@@ -18,12 +20,9 @@
 #include <objbase.h>
 #include <string>
 #include <cstdlib>
+#include <cstdio>
 #include <cstddef>
 #include <WebView2.h>
-
-// cmark is compiled as C with the default (Cdecl) calling convention.
-// Declare the one function we need explicitly to avoid /Gv (VectorCall).
-extern "C" char * __cdecl cmark_markdown_to_html(const char *text, size_t len, int options);
 
 #include "Helpers.h"
 #include "SciCall.h"
@@ -39,21 +38,33 @@ extern "C" char * __cdecl cmark_markdown_to_html(const char *text, size_t len, i
 #define MD_PREVIEW_MAX_SIZE		(1024 * 1024)
 //! debounce delay in milliseconds before refreshing the preview
 #define MD_PREVIEW_DEBOUNCE		300
-//! default split pane width (CSS pixels, scaled by DPI)
-#define MD_PREVIEW_SPLIT_WIDTH	400
-//! gap between editor and preview pane
-#define MD_PREVIEW_GAP			6
+//! default editor pane width in the split view
+#define MD_PREVIEW_SPLIT_WIDTH	480
+//! minimum editor pane width
+#define MD_PREVIEW_MIN_WIDTH	200
+//! width of the draggable splitter
+#define MD_PREVIEW_SPLITTER_W	4
+
+//! virtual host name that maps to the Notepad4.exe folder
+#define MD_PREVIEW_ASSETS_HOST	L"appassets"
 
 static const WCHAR *MD_PREVIEW_INI_KEY = L"MarkdownPreview";
+static const WCHAR *MD_PREVIEW_WD_INI_KEY = L"MarkdownPreviewWidth";
+
+static const WCHAR kPlaceholder[] = L"<html><head><meta charset=\"utf-8\"></head><body style=\"font-family:'Segoe UI','Microsoft YaHei';color:#888;margin:16px;\">Not a Markdown document.</body></html>";
+static const WCHAR kTooLarge[] = L"<html><head><meta charset=\"utf-8\"></head><body style=\"font-family:'Segoe UI','Microsoft YaHei';color:#888;margin:16px;\">Document too large for live preview.</body></html>";
 
 //=============================================================================
-// HTML template, %s is replaced with the cmark generated body fragment
+// HTML template. The Markdown source is embedded as JSON inside
+// <script type="application/json" id="md-source">.
 //=============================================================================
 static const char kHtmlHead[] = R"HTML(<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://appassets/marked.min.js"></script>
+<script src="https://appassets/mermaid.min.js"></script>
 <style>
 body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
        font-size: 14px; line-height: 1.7; margin: 16px; color: #1f2328; background: #ffffff; }
@@ -72,6 +83,9 @@ th, td { border: 1px solid #d0d7de; padding: 6px 12px; }
 th { background: #f6f8fa; font-weight: 600; }
 img { max-width: 100%; }
 hr { border: none; border-top: 1px solid #d0d7de; margin: 1.5em 0; }
+input[type="checkbox"] { margin-right: 6px; }
+.mermaid { background: transparent; }
+pre.mermaid { text-align: center; }
 @media (prefers-color-scheme: dark) {
   body { color: #c9d1d9; background: #0d1117; }
   a { color: #58a6ff; }
@@ -86,6 +100,44 @@ hr { border: none; border-top: 1px solid #d0d7de; margin: 1.5em 0; }
 </style>
 </head>
 <body>
+<div id="md-body">Loading...</div>
+)HTML";
+
+static const char kRenderScript[] = R"HTML(<script>
+(function () {
+    function render() {
+        var body = document.getElementById('md-body');
+        if (!body) return;
+        var raw = document.getElementById('md-source');
+        var md = raw ? JSON.parse(raw.textContent) : '';
+        if (typeof marked === 'undefined') {
+            body.textContent = md;
+            return;
+        }
+        var html = marked.parse(md);
+        body.innerHTML = html;
+
+        document.querySelectorAll('pre > code.language-mermaid').forEach(function (code) {
+            var pre = code.parentNode;
+            pre.classList.add('mermaid');
+            pre.textContent = code.textContent;
+            pre.removeChild(code);
+        });
+        if (typeof mermaid !== 'undefined') {
+            var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            try {
+                mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default', securityLevel: 'loose' });
+                mermaid.run();
+            } catch (e) { /* ignore render errors */ }
+        }
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', render);
+    } else {
+        render();
+    }
+})();
+</script>
 )HTML";
 
 static const char kHtmlTail[] = R"HTML(
@@ -93,20 +145,19 @@ static const char kHtmlTail[] = R"HTML(
 </html>
 )HTML";
 
-static const WCHAR kPlaceholder[] = L"<html><body style=\"font-family:'Segoe UI','Microsoft YaHei';color:#888;margin:16px;\">Not a Markdown document.</body></html>";
-
 //=============================================================================
 // Global state
 //=============================================================================
 static HWND g_hwndMain = nullptr;
+static HWND g_hwndSplitter = nullptr;
 static ICoreWebView2Controller *g_controller = nullptr;
 static ICoreWebView2Controller2 *g_controller2 = nullptr;
 static ICoreWebView2 *g_webview = nullptr;
 static bool g_bInitialized = false;
 static bool g_bEnabled = false;
 static bool g_bVisible = false;
-static bool g_bMarkdown = false;
 static bool g_bPendingLayout = false;
+static bool g_bDragging = false;
 static UINT_PTR g_uTimer = 0;
 static int g_iSplitWidth = MD_PREVIEW_SPLIT_WIDTH;
 static int g_lastY = 0;
@@ -118,8 +169,211 @@ static int g_lastCy = 0;
 //=============================================================================
 static void EditPreview_Update() noexcept;
 static void EditPreview_ApplyLayout() noexcept;
+static void EditPreview_Refresh() noexcept;
+static void EditPreview_SaveSplitWidth() noexcept;
 COREWEBVIEW2_COLOR EditPreview_GetDefaultBackgroundColor() noexcept;
 
+//=============================================================================
+// JSON escaping for embedding the Markdown source safely inside <script>
+//=============================================================================
+static void JsonEscapeAppend(const char *text, size_t len, std::string &out) noexcept {
+	out.push_back('"');
+	for (size_t i = 0; i < len; ++i) {
+		const unsigned char c = static_cast<unsigned char>(text[i]);
+		switch (c) {
+		case '"': out += "\\\""; break;
+		case '\\': out += "\\\\"; break;
+		case '\b': out += "\\b"; break;
+		case '\f': out += "\\f"; break;
+		case '\n': out += "\\n"; break;
+		case '\r': out += "\\r"; break;
+		case '\t': out += "\\t"; break;
+		case '<': out += "\\u003c"; break;
+		case '>': out += "\\u003e"; break;
+		default:
+			if (c < 0x20) {
+				char buf[8];
+				snprintf(buf, sizeof(buf), "\\u%04x", c);
+				out += buf;
+			} else {
+				out += static_cast<char>(c);
+			}
+		}
+	}
+	out.push_back('"');
+}
+
+//=============================================================================
+// Splitter window procedure
+//=============================================================================
+LRESULT CALLBACK EditPreview_SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	switch (msg) {
+	case WM_LBUTTONDOWN:
+		SetCapture(hwnd);
+		g_bDragging = true;
+		return 0;
+
+	case WM_MOUSEMOVE:
+		if (g_bDragging) {
+			POINT pt;
+			GetCursorPos(&pt);
+			ScreenToClient(g_hwndMain, &pt);
+			int width = pt.x;
+			if (width < MD_PREVIEW_MIN_WIDTH) {
+				width = MD_PREVIEW_MIN_WIDTH;
+			} else if (width > g_lastCx - MD_PREVIEW_MIN_WIDTH - MD_PREVIEW_SPLITTER_W) {
+				width = g_lastCx - MD_PREVIEW_MIN_WIDTH - MD_PREVIEW_SPLITTER_W;
+			}
+			if (width < MD_PREVIEW_MIN_WIDTH) {
+				width = MD_PREVIEW_MIN_WIDTH;
+			}
+			g_iSplitWidth = width;
+			// move splitter and preview pane live, editor is laid out on release
+			SetWindowPos(g_hwndSplitter, nullptr, width, g_lastY, 0, 0, SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
+			if (g_controller != nullptr) {
+				RECT rc;
+				rc.left = width + MD_PREVIEW_SPLITTER_W;
+				rc.top = g_lastY;
+				rc.right = g_lastCx;
+				rc.bottom = g_lastY + g_lastCy;
+				g_controller->put_Bounds(rc);
+			}
+		}
+		return 0;
+
+	case WM_LBUTTONUP:
+		if (g_bDragging) {
+			g_bDragging = false;
+			ReleaseCapture();
+			EditPreview_SaveSplitWidth();
+			PostMessage(g_hwndMain, WM_SIZE, SIZE_RESTORED, MAKELPARAM(g_lastCx, g_lastCy));
+		}
+		return 0;
+
+	case WM_SETCURSOR:
+		SetCursor(LoadCursor(nullptr, IDC_SIZEWE));
+		return TRUE;
+
+	case WM_ERASEBKGND:
+		return 1;
+	}
+	return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+//=============================================================================
+//
+// EditPreview_RegisterSplitterClass()
+//
+//=============================================================================
+static bool EditPreview_RegisterSplitterClass() noexcept {
+	WNDCLASS wc = {};
+	wc.lpfnWndProc = EditPreview_SplitterProc;
+	wc.hInstance = GetModuleHandle(nullptr);
+	wc.lpszClassName = L"Notepad4Splitter";
+	wc.hCursor = LoadCursor(nullptr, IDC_SIZEWE);
+	wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+	if (RegisterClass(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+		return false;
+	}
+	return true;
+}
+
+//=============================================================================
+//
+// EditPreview_CreateSplitter()
+//
+//=============================================================================
+static void EditPreview_CreateSplitter() noexcept {
+	if (g_hwndSplitter != nullptr) {
+		return;
+	}
+	if (!EditPreview_RegisterSplitterClass()) {
+		return;
+	}
+	g_hwndSplitter = CreateWindowEx(0, L"Notepad4Splitter", nullptr,
+		WS_CHILD | WS_CLIPSIBLINGS, 0, 0, MD_PREVIEW_SPLITTER_W, 0,
+		g_hwndMain, nullptr, GetModuleHandle(nullptr), nullptr);
+}
+
+//=============================================================================
+//
+// EditPreview_GetDefaultBackgroundColor()
+//
+//=============================================================================
+COREWEBVIEW2_COLOR EditPreview_GetDefaultBackgroundColor() noexcept {
+	const bool dark = np2StyleTheme == StyleTheme_Dark;
+	if (dark) {
+		return { 255, 13, 17, 23 };	// #0d1117
+	}
+	return { 255, 255, 255, 255 };	// #ffffff
+}
+
+//=============================================================================
+//
+// EditPreview_Init()
+//
+//=============================================================================
+void EditPreview_Init(HWND hwnd) noexcept {
+	g_hwndMain = hwnd;
+	g_bEnabled = IniGetInt(INI_SECTION_NAME_FLAGS, MD_PREVIEW_INI_KEY, 0) != 0;
+	g_iSplitWidth = IniGetInt(INI_SECTION_NAME_FLAGS, MD_PREVIEW_WD_INI_KEY, MD_PREVIEW_SPLIT_WIDTH);
+	if (g_bEnabled) {
+		EditPreview_CreateSplitter();
+	}
+}
+
+//=============================================================================
+//
+// EditPreview_OnDestroy()
+//
+//=============================================================================
+void EditPreview_OnDestroy() noexcept {
+	if (g_uTimer != 0) {
+		KillTimer(g_hwndMain, ID_MDPREVIEWTIMER);
+		g_uTimer = 0;
+	}
+	if (g_hwndSplitter != nullptr) {
+		DestroyWindow(g_hwndSplitter);
+		g_hwndSplitter = nullptr;
+	}
+	if (g_controller != nullptr) {
+		g_controller->Release();
+		g_controller = nullptr;
+	}
+	if (g_controller2 != nullptr) {
+		g_controller2->Release();
+		g_controller2 = nullptr;
+	}
+	if (g_webview != nullptr) {
+		g_webview->Release();
+		g_webview = nullptr;
+	}
+	g_bInitialized = false;
+}
+
+//=============================================================================
+//
+// EditPreview_IsVisible()
+//
+//=============================================================================
+bool EditPreview_IsVisible() noexcept {
+	return g_bVisible;
+}
+
+//=============================================================================
+//
+// EditPreview_IsMarkdown()
+//
+//=============================================================================
+bool EditPreview_IsMarkdown() noexcept {
+	return pLexCurrent != nullptr && pLexCurrent->iLexer == SCLEX_MARKDOWN;
+}
+
+//=============================================================================
+//
+// EditPreview_InitWebView()
+//
+//=============================================================================
 class EnvCompletedHandler final : public ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler {
 public:
 	EnvCompletedHandler() = default;
@@ -170,6 +424,12 @@ public:
 								settings->put_IsZoomControlEnabled(FALSE);
 								settings->Release();
 							}
+							// map "https://appassets" to the Notepad4.exe folder so that
+							// marked.min.js and mermaid.min.js can be loaded offline.
+							WCHAR exePath[MAX_PATH];
+							GetModuleFileName(nullptr, exePath, COUNTOF(exePath));
+							PathRemoveFileSpec(exePath);
+							g_webview->SetVirtualHostNameToFolderMapping(MD_PREVIEW_ASSETS_HOST, exePath, COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
 						}
 						if (SUCCEEDED(controller->QueryInterface(IID_PPV_ARGS(&g_controller2))) && g_controller2 != nullptr) {
 							g_controller2->put_DefaultBackgroundColor(EditPreview_GetDefaultBackgroundColor());
@@ -181,7 +441,7 @@ public:
 							// re-layout the whole window now that the pane is ready
 							PostMessage(g_hwndMain, WM_SIZE, SIZE_RESTORED, MAKELPARAM(g_lastCx, g_lastCy));
 						}
-						EditPreview_Update();
+						EditPreview_Refresh();
 					}
 					delete this;
 					return S_OK;
@@ -196,72 +456,6 @@ public:
 		return S_OK;
 	}
 };
-
-//=============================================================================
-//
-// EditPreview_GetDefaultBackgroundColor()
-//
-//=============================================================================
-COREWEBVIEW2_COLOR EditPreview_GetDefaultBackgroundColor() noexcept {
-	const bool dark = np2StyleTheme == StyleTheme_Dark;
-	if (dark) {
-		return { 255, 13, 17, 23 };	// #0d1117
-	}
-	return { 255, 255, 255, 255 };	// #ffffff
-}
-
-//=============================================================================
-//
-// EditPreview_Init()
-//
-//=============================================================================
-void EditPreview_Init(HWND hwnd) noexcept {
-	g_hwndMain = hwnd;
-	g_bEnabled = IniGetInt(INI_SECTION_NAME_FLAGS, MD_PREVIEW_INI_KEY, 0) != 0;
-}
-
-//=============================================================================
-//
-// EditPreview_OnDestroy()
-//
-//=============================================================================
-void EditPreview_OnDestroy() noexcept {
-	if (g_uTimer != 0) {
-		KillTimer(g_hwndMain, ID_MDPREVIEWTIMER);
-		g_uTimer = 0;
-	}
-	if (g_controller != nullptr) {
-		g_controller->Release();
-		g_controller = nullptr;
-	}
-	if (g_controller2 != nullptr) {
-		g_controller2->Release();
-		g_controller2 = nullptr;
-	}
-	if (g_webview != nullptr) {
-		g_webview->Release();
-		g_webview = nullptr;
-	}
-	g_bInitialized = false;
-}
-
-//=============================================================================
-//
-// EditPreview_IsVisible()
-//
-//=============================================================================
-bool EditPreview_IsVisible() noexcept {
-	return g_bVisible;
-}
-
-//=============================================================================
-//
-// EditPreview_IsMarkdown()
-//
-//=============================================================================
-bool EditPreview_IsMarkdown() noexcept {
-	return pLexCurrent != nullptr && pLexCurrent->iLexer == SCLEX_MARKDOWN;
-}
 
 //=============================================================================
 //
@@ -281,17 +475,29 @@ static void EditPreview_InitWebView() noexcept {
 //
 // EditPreview_ApplyLayout()
 //
+//   Positions the splitter and the preview pane for the current client area.
+//
 //=============================================================================
 static void EditPreview_ApplyLayout() noexcept {
-	if (g_controller == nullptr) {
+	if (!g_bVisible) {
+		if (g_hwndSplitter != nullptr) {
+			ShowWindow(g_hwndSplitter, SW_HIDE);
+		}
+		if (g_controller != nullptr) {
+			g_controller->put_IsVisible(FALSE);
+		}
 		return;
 	}
-	if (!g_bVisible) {
-		g_controller->put_IsVisible(FALSE);
+	if (g_controller == nullptr) {
+		g_bPendingLayout = true;
 		return;
+	}
+	if (g_hwndSplitter != nullptr) {
+		SetWindowPos(g_hwndSplitter, nullptr, g_iSplitWidth, g_lastY, MD_PREVIEW_SPLITTER_W, g_lastCy, SWP_NOZORDER | SWP_NOACTIVATE);
+		ShowWindow(g_hwndSplitter, SW_SHOW);
 	}
 	RECT rc;
-	rc.left = g_lastCx - g_iSplitWidth;
+	rc.left = g_iSplitWidth + MD_PREVIEW_SPLITTER_W;
 	rc.top = g_lastY;
 	rc.right = g_lastCx;
 	rc.bottom = g_lastY + g_lastCy;
@@ -311,35 +517,45 @@ int EditPreview_OnSize(int y, int cx, int cy) noexcept {
 	g_lastCx = cx;
 	g_lastCy = cy;
 	if (!g_bVisible) {
+		EditPreview_ApplyLayout();
 		return cx;
 	}
+	if (g_iSplitWidth < MD_PREVIEW_MIN_WIDTH) {
+		g_iSplitWidth = MD_PREVIEW_MIN_WIDTH;
+	}
+	if (g_iSplitWidth > cx - MD_PREVIEW_MIN_WIDTH - MD_PREVIEW_SPLITTER_W) {
+		g_iSplitWidth = cx - MD_PREVIEW_MIN_WIDTH - MD_PREVIEW_SPLITTER_W;
+	}
+	if (g_iSplitWidth < MD_PREVIEW_MIN_WIDTH) {
+		g_iSplitWidth = MD_PREVIEW_MIN_WIDTH;
+	}
 	if (g_controller == nullptr) {
-		// pane not ready yet, mark for layout once initialized
 		g_bPendingLayout = true;
 		return cx;
 	}
-	int editWidth = cx - g_iSplitWidth - MD_PREVIEW_GAP;
-	if (editWidth < 200) {
-		editWidth = 200;
-		g_iSplitWidth = cx - 200 - MD_PREVIEW_GAP;
-		if (g_iSplitWidth < 200) {
-			g_iSplitWidth = 200;
-		}
-	}
 	EditPreview_ApplyLayout();
-	return editWidth;
+	return g_iSplitWidth;
 }
 
 //=============================================================================
 //
-// EditPreview_ShowPlaceholder()
+// EditPreview_SaveSplitWidth()
 //
 //=============================================================================
-static void EditPreview_ShowPlaceholder(LPCWSTR text) noexcept {
+void EditPreview_SaveSplitWidth() noexcept {
+	IniSetInt(INI_SECTION_NAME_FLAGS, MD_PREVIEW_WD_INI_KEY, g_iSplitWidth);
+}
+
+//=============================================================================
+//
+// EditPreview_ShowPage()
+//
+//=============================================================================
+static void EditPreview_ShowPage(LPCWSTR html) noexcept {
 	if (g_webview == nullptr) {
 		return;
 	}
-	BSTR bstr = SysAllocString(text);
+	BSTR bstr = SysAllocString(html);
 	if (bstr != nullptr) {
 		g_webview->NavigateToString(bstr);
 		SysFreeString(bstr);
@@ -348,10 +564,12 @@ static void EditPreview_ShowPlaceholder(LPCWSTR text) noexcept {
 
 //=============================================================================
 //
-// EditPreview_Update()
+// EditPreview_Refresh()
+//
+//   Rebuilds the preview HTML from the current document.
 //
 //=============================================================================
-static void EditPreview_Update() noexcept {
+static void EditPreview_Refresh() noexcept {
 	if (g_webview == nullptr) {
 		return;
 	}
@@ -359,13 +577,13 @@ static void EditPreview_Update() noexcept {
 		return;
 	}
 	if (!EditPreview_IsMarkdown()) {
-		EditPreview_ShowPlaceholder(kPlaceholder);
+		EditPreview_ShowPage(kPlaceholder);
 		return;
 	}
 
 	const Sci_Position len = SciCall_GetLength();
 	if (len <= 0 || len > MD_PREVIEW_MAX_SIZE) {
-		EditPreview_ShowPlaceholder(L"<html><body style=\"font-family:'Segoe UI','Microsoft YaHei';color:#888;margin:16px;\">Document too large for live preview.</body></html>");
+		EditPreview_ShowPage(kTooLarge);
 		return;
 	}
 
@@ -375,25 +593,22 @@ static void EditPreview_Update() noexcept {
 	}
 	SciCall_GetText(len + 1, pText);
 
-	char *pBody = cmark_markdown_to_html(pText, static_cast<size_t>(len), 0);
+	std::string html;
+	html.reserve(static_cast<size_t>(len) * 2 + CSTRLEN(kHtmlHead) + CSTRLEN(kRenderScript) + CSTRLEN(kHtmlTail) + 256);
+	html.assign(kHtmlHead);
+	html += "<script type=\"application/json\" id=\"md-source\">";
+	JsonEscapeAppend(pText, static_cast<size_t>(len), html);
+	html += "</script>";
+	html += kRenderScript;
+	html += kHtmlTail;
 	NP2HeapFree(pText);
-	if (pBody == nullptr) {
-		return;
-	}
-
-	std::string fullHtml;
-	fullHtml.reserve(CSTRLEN(kHtmlHead) + strlen(pBody) + CSTRLEN(kHtmlTail) + 1);
-	fullHtml.assign(kHtmlHead);
-	fullHtml.append(pBody);
-	fullHtml.append(kHtmlTail);
-	free(pBody);
 
 	// convert UTF-8 to UTF-16 for NavigateToString()
-	const int wlen = MultiByteToWideChar(CP_UTF8, 0, fullHtml.data(), static_cast<int>(fullHtml.size()), nullptr, 0);
+	const int wlen = MultiByteToWideChar(CP_UTF8, 0, html.data(), static_cast<int>(html.size()), nullptr, 0);
 	if (wlen > 0) {
 		wchar_t *pwsz = static_cast<wchar_t *>(NP2HeapAlloc(static_cast<size_t>(wlen + 1) * sizeof(wchar_t)));
 		if (pwsz != nullptr) {
-			MultiByteToWideChar(CP_UTF8, 0, fullHtml.data(), static_cast<int>(fullHtml.size()), pwsz, wlen);
+			MultiByteToWideChar(CP_UTF8, 0, html.data(), static_cast<int>(html.size()), pwsz, wlen);
 			pwsz[wlen] = L'\0';
 			BSTR bstr = SysAllocStringLen(pwsz, wlen);
 			if (bstr != nullptr) {
@@ -415,7 +630,7 @@ void EditPreview_OnTimer() noexcept {
 		KillTimer(g_hwndMain, ID_MDPREVIEWTIMER);
 		g_uTimer = 0;
 	}
-	EditPreview_Update();
+	EditPreview_Refresh();
 }
 
 //=============================================================================
@@ -446,7 +661,7 @@ void EditPreview_OnFileOpened() noexcept {
 	if (!g_bVisible) {
 		return;
 	}
-	EditPreview_Update();
+	EditPreview_Refresh();
 }
 
 //=============================================================================
@@ -459,8 +674,17 @@ void EditPreview_OnThemeChanged() noexcept {
 		g_controller2->put_DefaultBackgroundColor(EditPreview_GetDefaultBackgroundColor());
 	}
 	if (g_bVisible) {
-		EditPreview_Update();
+		EditPreview_Refresh();
 	}
+}
+
+//=============================================================================
+//
+// EditPreview_Update()
+//
+//=============================================================================
+static void EditPreview_Update() noexcept {
+	EditPreview_Refresh();
 }
 
 //=============================================================================
@@ -477,11 +701,8 @@ void EditPreview_Toggle() noexcept {
 
 	if (g_bVisible) {
 		EditPreview_InitWebView();
-		// request an immediate layout of the split view
 		if (g_controller == nullptr) {
 			g_bPendingLayout = true;
-		} else {
-			EditPreview_ApplyLayout();
 		}
 		EditPreview_OnDocumentChanged();
 	} else {
@@ -489,9 +710,7 @@ void EditPreview_Toggle() noexcept {
 			KillTimer(g_hwndMain, ID_MDPREVIEWTIMER);
 			g_uTimer = 0;
 		}
-		if (g_controller != nullptr) {
-			g_controller->put_IsVisible(FALSE);
-		}
+		EditPreview_ApplyLayout();
 	}
 
 	// re-layout the editor window
