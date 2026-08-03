@@ -320,6 +320,10 @@ static bool g_bAnchorValid = true;
 static int g_iJsHeadingCount = -1;
 // heading lines in document order (0-based Sci_Line), rebuilt on refresh
 static std::vector<Sci_Line> g_headings;
+// cumulative per-line content weight; lines that render tall in the preview
+// (tables, code, lists, quotes) get a higher weight so interpolation between
+// headings tracks the rendered height instead of raw line counts.
+static std::vector<double> g_contentPrefix;
 
 //=============================================================================
 // forward declarations
@@ -904,6 +908,7 @@ static void EditPreview_ExecuteScript(const std::string &script) noexcept {
 //=============================================================================
 static void EditPreview_ScanHeadings() noexcept {
 	g_headings.clear();
+	g_contentPrefix.clear();
 	const Sci_Position len = SciCall_GetLength();
 	if (len <= 0) {
 		return;
@@ -920,12 +925,40 @@ static void EditPreview_ScanHeadings() noexcept {
 	const char *end = text + len;
 	const char *p = text;
 	Sci_Line line = 0;
+	double acc = 0.0;
 	while (p < end) {
 		const char *lineStart = p;
 		while (p < end && *p != '\n') {
 			++p;
 		}
 		const char *lineEnd = p;
+
+		// estimate how tall this line renders in the preview
+		double weight = 1.0;
+		{
+			bool empty = true;
+			for (const char *c = lineStart; c < lineEnd; ++c) {
+				if (*c != ' ' && *c != '\t' && *c != '\r') {
+					empty = false;
+					break;
+				}
+			}
+			if (empty) {
+				weight = 0.3;
+			} else if (*lineStart == '|') {
+				weight = 2.5;	// table row
+			} else if (*lineStart == ' ' || *lineStart == '\t') {
+				weight = 2.5;	// indented code / block
+			} else if (*lineStart == '>') {
+				weight = 1.3;	// blockquote
+			} else if (*lineStart == '-' || *lineStart == '*' || (*lineStart >= '0' && *lineStart <= '9')) {
+				weight = 1.6;	// list item
+			} else if (*lineStart == '#') {
+				weight = 2.0;	// heading
+			}
+		}
+		acc += weight;
+		g_contentPrefix.push_back(acc);
 
 		// ATX heading: ^#{1,6}\s+<non-empty content>
 		const char *q = lineStart;
@@ -1199,9 +1232,13 @@ static void EditPreview_SyncToPreview() noexcept {
 			double pos = 0.0;
 			if (lo + 1 < g_headings.size()) {
 				const Sci_Line lineL = g_headings[lo];
-				const Sci_Line span = g_headings[lo + 1] - lineL;
-				if (span > 0) {
-					pos = static_cast<double>(first - lineL) / span;
+				const Sci_Line lineN = g_headings[lo + 1];
+				const double wL = g_contentPrefix[lineL];
+				const double wN = g_contentPrefix[lineN];
+				const double wSpan = wN - wL;
+				if (wSpan > 0.0) {
+					const double wX = g_contentPrefix[first];
+					pos = (wX - wL) / wSpan;
 					if (pos < 0.0) {
 						pos = 0.0;
 					} else if (pos > 1.0) {
@@ -1289,10 +1326,24 @@ void EditPreview_SyncEditAnchor() noexcept {
 		return;
 	}
 	Sci_Line line = g_headings[g_iAnchorIndex];
-	if (g_iAnchorIndex + 1 < static_cast<int>(g_headings.size())) {
-		const Sci_Line span = g_headings[g_iAnchorIndex + 1] - line;
-		if (span > 0) {
-			line += static_cast<Sci_Line>(g_dAnchorPos * span);
+	if (g_iAnchorIndex + 1 < static_cast<int>(g_headings.size()) && g_iAnchorIndex < static_cast<int>(g_contentPrefix.size())) {
+		const Sci_Line lineN = g_headings[g_iAnchorIndex + 1];
+		const double wL = g_contentPrefix[line];
+		const double wN = g_contentPrefix[lineN];
+		const double wSpan = wN - wL;
+		if (wSpan > 0.0) {
+			const double target = wL + g_dAnchorPos * wSpan;
+			// inverse map: find the line whose content weight is closest to target
+			Sci_Line lo2 = line, hi2 = lineN;
+			while (lo2 + 1 < hi2) {
+				const Sci_Line mid = (lo2 + hi2) / 2;
+				if (g_contentPrefix[mid] <= target) {
+					lo2 = mid;
+				} else {
+					hi2 = mid;
+				}
+			}
+			line = lo2;
 		}
 	}
 	if (line < 0) {
