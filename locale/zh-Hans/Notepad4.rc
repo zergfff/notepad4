@@ -405,8 +405,12 @@ BEGIN
 			MENUITEM "跳转到选区结束(&T)\tCtrl+Shift+句号(>.)",	CMD_JUMP2SELEND
 		END
 	END
-	POPUP "查看(&V)"
+		POPUP "查看(&V)"
 	BEGIN
+#if NP2_ENABLE_MD_PREVIEW
+		MENUITEM "Markdown 预览(&V)\tCtrl+F10",	IDM_VIEW_MDPREVIEW
+		MENUITEM SEPARATOR
+#endif
 		MENUITEM "默认代码字体(&C)...\tAlt+F12",	IDM_VIEW_DEFAULT_CODE_FONT
 		MENUITEM "默认文本字体(&D)...",				IDM_VIEW_DEFAULT_TEXT_FONT
 		POPUP "光标样式(&A)"
@@ -640,10 +644,6 @@ BEGIN
 			END
 #endif
 		END
-#if NP2_ENABLE_MD_PREVIEW
-		MENUITEM SEPARATOR
-		MENUITEM "Markdown 预览(&V)\tCtrl+F10",	IDM_VIEW_MDPREVIEW
-#endif
 		POPUP "窗口选项(&P)"
 		BEGIN
 			MENUITEM "始终置顶(&T)\tAlt+Shift+T",	IDM_VIEW_ALWAYSONTOP
