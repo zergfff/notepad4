@@ -267,14 +267,32 @@ static const char kRenderScript[] = R"HTML(<script>
         }
         return tops;
     }
-    window.previewAnchor = function (i, pos) {
+    window.previewAnchor = function (i, pos, code) {
+        var el = document.getElementById('anc-' + i);
+        var info = null;
+        if (el) {
+            info = { el: el, code: false };
+        } else {
+            var noTag = window.__noTag || [];
+            var idx = noTag.indexOf(i);
+            if (idx >= 0) {
+                var ue = document.querySelectorAll('pre, table')[idx];
+                if (ue) info = { el: ue, code: true };
+            }
+        }
+        if (!info) return;
+        if (code && info.code) {
+            // inside a fenced code block: interpolate within its rendered height
+            window.scrollTo(0, info.el.offsetTop + pos * info.el.offsetHeight - 16);
+            return;
+        }
+        if (pos === undefined || pos < 0 || pos > 1) {
+            window.scrollTo(0, info.el.offsetTop - 16);
+            return;
+        }
         var tops = getAnchorTops();
         var t = tops[i];
         if (t === undefined) return;
-        if (pos === undefined || pos < 0 || pos > 1) {
-            window.scrollTo(0, t - 16);
-            return;
-        }
         var t2 = tops[i + 1];
         if (t2 !== undefined) t += pos * (t2 - t);
         window.scrollTo(0, t - 16);
@@ -388,6 +406,9 @@ static bool EditPreview_Throttle() noexcept {
 }
 // heading lines in document order (0-based Sci_Line), rebuilt on refresh
 static std::vector<Sci_Line> g_headings;
+// parallel to g_headings: for a fenced code block anchor this is its end line
+static std::vector<Sci_Line> g_codeEnds;
+static int g_lastCodeAnchor = -1;
 // cumulative per-line content weight; lines that render tall in the preview
 // (tables, code, lists, quotes) get a higher weight so interpolation between
 // headings tracks the rendered height instead of raw line counts.
@@ -935,6 +956,7 @@ static void EditPreview_ExecuteScript(const std::string &script) noexcept {
 //=============================================================================
 static void EditPreview_ScanHeadings() noexcept {
 	g_headings.clear();
+	g_codeEnds.clear();
 	g_contentPrefix.clear();
 	const Sci_Position len = SciCall_GetLength();
 	if (len <= 0) {
@@ -986,6 +1008,10 @@ static void EditPreview_ScanHeadings() noexcept {
 		if (fenceLine) {
 			if (!inFence) {
 				g_headings.push_back(line);	// fenced code block start is an anchor
+				g_codeEnds.push_back(line);
+				g_lastCodeAnchor = static_cast<int>(g_headings.size()) - 1;
+			} else {
+				g_codeEnds[g_lastCodeAnchor] = line;
 			}
 			inFence = !inFence;
 			blockOpen = false;
@@ -1033,12 +1059,14 @@ static void EditPreview_ScanHeadings() noexcept {
 				}
 				if (isHeading) {
 					g_headings.push_back(line);
+					g_codeEnds.push_back(line);
 					blockOpen = false;
 				} else {
 					// every block start is an anchor: paragraphs, quotes, lists,
 					// tables and indented code blocks alike
 					if (!blockOpen) {
 						g_headings.push_back(line);
+						g_codeEnds.push_back(line);
 					}
 					blockOpen = true;
 				}
@@ -1304,26 +1332,31 @@ static void EditPreview_SyncToPreview() noexcept {
 			}
 		}
 		if (lo > 0) {
-			--lo;	// lo = index of the nearest heading at/above first
+			--lo;	// lo = index of the nearest anchor at/above first
 			double pos = 0.0;
-			if (lo + 1 < g_headings.size()) {
-				const Sci_Line lineL = g_headings[lo];
-				const Sci_Line lineN = g_headings[lo + 1];
-				const double wL = g_contentPrefix[lineL];
-				const double wN = g_contentPrefix[lineN];
-				const double wSpan = wN - wL;
-				if (wSpan > 0.0) {
-					const double wX = g_contentPrefix[first];
-					pos = (wX - wL) / wSpan;
-					if (pos < 0.0) {
-						pos = 0.0;
-					} else if (pos > 1.0) {
-						pos = 1.0;
-					}
+			bool inCode = false;
+			const Sci_Line lineL = g_headings[lo];
+			const Sci_Line codeEnd = g_codeEnds[lo];
+			if (codeEnd > lineL && first < codeEnd) {
+				// inside a fenced code block: map by line proportion to the
+				// code block's rendered height (as VS Code does)
+				inCode = true;
+				pos = static_cast<double>(first - lineL) / (codeEnd - lineL);
+			} else {
+				// between anchors: interpolate by source-line ratio
+				const Sci_Line lineN = (lo + 1 < g_headings.size()) ? g_headings[lo + 1] : total;
+				const Sci_Line span = lineN - lineL;
+				if (span > 0) {
+					pos = static_cast<double>(first - lineL) / span;
 				}
 			}
-			WCHAR js[96];
-			swprintf(js, COUNTOF(js), L"window.previewAnchor(%d,%f);", static_cast<int>(lo), pos);
+			if (pos < 0.0) {
+				pos = 0.0;
+			} else if (pos > 1.0) {
+				pos = 1.0;
+			}
+			WCHAR js[112];
+			swprintf(js, COUNTOF(js), L"window.previewAnchor(%d,%f,%d);", static_cast<int>(lo), pos, inCode ? 1 : 0);
 			EditPreview_LogScroll("anchor->", static_cast<double>(lo) + pos);
 			g_webview->ExecuteScript(js, nullptr);
 			return;
