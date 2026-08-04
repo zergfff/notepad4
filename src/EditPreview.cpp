@@ -184,9 +184,11 @@ static const char kRenderScript[] = R"HTML(<script>
         var anc = 0;
         var inFence = false;
         var blockOpen = false;
+        var noTag = [];	// anchor indices that map to rendered <table>/<pre>
         for (var i = 0; i < srcLines.length; i++) {
             var line = srcLines[i];
             if (/^(`{3,}|~{3,})/.test(line)) {
+                if (!inFence) { noTag.push(anc); anc++; }	// fenced code start
                 inFence = !inFence;
                 blockOpen = false;
                 continue;
@@ -203,7 +205,10 @@ static const char kRenderScript[] = R"HTML(<script>
             if (!blockOpen) {
                 var isIndented = /^( {4}|\t)/.test(line);
                 var isTable = /^\|/.test(line);
-                if (!isIndented && !isTable) {
+                if (isIndented || isTable) {
+                    noTag.push(anc);
+                    anc++;
+                } else {
                     // paragraphs, blockquotes and list items: put the span after
                     // the leading marker so the markdown structure is preserved
                     var lm = /^(\s*[>*+-]\s+|\s*\d+[.)]\s+)/.exec(line);
@@ -218,6 +223,17 @@ static const char kRenderScript[] = R"HTML(<script>
         }
         var html = marked.parse(srcLines.join('\n'));
         body.innerHTML = html;
+        // build the anchor position table from the rendered DOM: tagged spans/
+        // headings plus every <table>/<pre> for the untagged indices
+        var anchorTops = [];
+        document.querySelectorAll('[id^="anc-"]').forEach(function (el) {
+            anchorTops[parseInt(el.id.substring(4), 10)] = el.offsetTop;
+        });
+        var untagged = document.querySelectorAll('pre, table');
+        for (var k = 0; k < untagged.length && k < noTag.length; k++) {
+            anchorTops[noTag[k]] = untagged[k].offsetTop;
+        }
+        window.__anchorTops = anchorTops;
         if (window.chrome && window.chrome.webview) {
             // report how many anchors were tagged so the editor can verify the
             // indices are in agreement and fall back to proportional sync if not
@@ -243,34 +259,34 @@ static const char kRenderScript[] = R"HTML(<script>
     }
 
     window.previewAnchor = function (i, pos) {
-        var el = document.getElementById('anc-' + i);
-        if (!el) return;
+        var tops = window.__anchorTops;
+        if (!tops) return;
+        var t = tops[i];
+        if (t === undefined) return;
         if (pos === undefined || pos < 0 || pos > 1) {
-            el.scrollIntoView({ block: 'start' });
+            window.scrollTo(0, t - 16);
             return;
         }
-        var target = el.offsetTop;
-        var el2 = document.getElementById('anc-' + (i + 1));
-        if (el2) target += pos * (el2.offsetTop - el.offsetTop);
-        window.scrollTo(0, target - 16);
+        var t2 = tops[i + 1];
+        if (t2 !== undefined) t += pos * (t2 - t);
+        window.scrollTo(0, t - 16);
     };
     function topAnchorRange() {
-        var els = document.querySelectorAll('[id^="anc-"]');
+        var tops = window.__anchorTops;
+        if (!tops) return null;
         var top = window.scrollY + 16;
         var prev = -1, next = -1;
-        for (var i = 0; i < els.length; i++) {
-            var idx = parseInt(els[i].id.substring(4), 10);
-            if (els[i].offsetTop <= top) prev = idx;
-            else { next = idx; break; }
+        for (var i = 0; i < tops.length; i++) {
+            if (tops[i] === undefined) continue;
+            if (tops[i] <= top) prev = i;
+            else { next = i; break; }
         }
         if (prev >= 0) {
-            var pe = document.getElementById('anc-' + prev);
             var pos = 0;
             if (next >= 0) {
-                var ne = document.getElementById('anc-' + next);
-                var span = ne.offsetTop - pe.offsetTop;
+                var span = tops[next] - tops[prev];
                 if (span > 0) {
-                    pos = (top - pe.offsetTop) / span;
+                    pos = (top - tops[prev]) / span;
                     if (pos < 0) pos = 0;
                     else if (pos > 1) pos = 1;
                 }
@@ -981,6 +997,9 @@ static void EditPreview_ScanHeadings() noexcept {
 
 		double weight = 1.0;
 		if (fenceLine) {
+			if (!inFence) {
+				g_headings.push_back(line);	// fenced code block start is an anchor
+			}
 			inFence = !inFence;
 			blockOpen = false;
 			weight = 2.5;
@@ -1029,20 +1048,9 @@ static void EditPreview_ScanHeadings() noexcept {
 					g_headings.push_back(line);
 					blockOpen = false;
 				} else {
-					// indented code block: 4+ leading spaces or a tab
-					bool isIndented = (fc == '\t');
-					if (!isIndented && fc == ' ' && (lineEnd - lineStart) >= 4) {
-						bool allSp = true;
-						for (int k = 0; k < 4; ++k) {
-							if (lineStart[k] != ' ') {
-								allSp = false;
-								break;
-							}
-						}
-						isIndented = allSp;
-					}
-					const bool isTable = (fc == '|');
-					if (!blockOpen && !isIndented && !isTable) {
+					// every block start is an anchor: paragraphs, quotes, lists,
+					// tables and indented code blocks alike
+					if (!blockOpen) {
 						g_headings.push_back(line);
 					}
 					blockOpen = true;
