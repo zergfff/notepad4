@@ -26,6 +26,8 @@
 #define APPM_MDPREVIEW_SCROLL		(WM_APP + 8)
 //! posted to the main window when the preview pane lands on a heading
 #define APPM_MDPREVIEW_ANCHOR		(WM_APP + 9)
+//! posted to the main window when the user wheels over the preview pane
+#define APPM_MDPREVIEW_WHEEL		(WM_APP + 10)
 
 //! preview color theme
 enum {
@@ -43,6 +45,7 @@ void EditPreview_OnTimer() noexcept;
 void EditPreview_OnEditScroll() noexcept;
 void EditPreview_SyncEditScroll() noexcept;
 void EditPreview_SyncEditAnchor() noexcept;
+void EditPreview_OnWheel() noexcept;
 void EditPreview_OnThemeChanged() noexcept;
 void EditPreview_OnDestroy() noexcept;
 bool EditPreview_IsVisible() noexcept;

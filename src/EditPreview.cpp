@@ -127,6 +127,9 @@ body { background: var(--bg); color: var(--fg); min-height: 100vh;
        box-sizing: border-box; margin: 0; padding: 16px;
        font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
        font-size: 14px; line-height: 1.7; }
+/* single scrollbar: hide the preview's, wheel is forwarded to the editor */
+html { scrollbar-width: none; -ms-overflow-style: none; }
+html::-webkit-scrollbar { display: none; }
 h1, h2, h3, h4, h5, h6 { margin: 1.2em 0 0.6em; line-height: 1.3; }
 h1 { border-bottom: 1px solid var(--border); padding-bottom: .3em; }
 h2 { border-bottom: 1px solid var(--border); padding-bottom: .3em; }
@@ -223,17 +226,10 @@ static const char kRenderScript[] = R"HTML(<script>
         }
         var html = marked.parse(srcLines.join('\n'));
         body.innerHTML = html;
-        // build the anchor position table from the rendered DOM: tagged spans/
-        // headings plus every <table>/<pre> for the untagged indices
-        var anchorTops = [];
-        document.querySelectorAll('[id^="anc-"]').forEach(function (el) {
-            anchorTops[parseInt(el.id.substring(4), 10)] = el.offsetTop;
-        });
-        var untagged = document.querySelectorAll('pre, table');
-        for (var k = 0; k < untagged.length && k < noTag.length; k++) {
-            anchorTops[noTag[k]] = untagged[k].offsetTop;
-        }
-        window.__anchorTops = anchorTops;
+        // remember which anchor indices map to rendered <table>/<pre> elements;
+        // positions are read live so window resizes (which reflow the page and
+        // change every offset) stay correct
+        window.__noTag = noTag;
         if (window.chrome && window.chrome.webview) {
             // report how many anchors were tagged so the editor can verify the
             // indices are in agreement and fall back to proportional sync if not
@@ -258,9 +254,21 @@ static const char kRenderScript[] = R"HTML(<script>
         renderMarkdown(src);
     }
 
+    function getAnchorTops() {
+        var tops = [];
+        var els = document.querySelectorAll('[id^="anc-"]');
+        for (var i = 0; i < els.length; i++) {
+            tops[parseInt(els[i].id.substring(4), 10)] = els[i].offsetTop;
+        }
+        var noTag = window.__noTag || [];
+        var untagged = document.querySelectorAll('pre, table');
+        for (var k = 0; k < untagged.length && k < noTag.length; k++) {
+            tops[noTag[k]] = untagged[k].offsetTop;
+        }
+        return tops;
+    }
     window.previewAnchor = function (i, pos) {
-        var tops = window.__anchorTops;
-        if (!tops) return;
+        var tops = getAnchorTops();
         var t = tops[i];
         if (t === undefined) return;
         if (pos === undefined || pos < 0 || pos > 1) {
@@ -272,8 +280,7 @@ static const char kRenderScript[] = R"HTML(<script>
         window.scrollTo(0, t - 16);
     };
     function topAnchorRange() {
-        var tops = window.__anchorTops;
-        if (!tops) return null;
+        var tops = getAnchorTops();
         var top = window.scrollY + 16;
         var prev = -1, next = -1;
         for (var i = 0; i < tops.length; i++) {
@@ -321,7 +328,15 @@ static const char kRenderScript[] = R"HTML(<script>
     } else {
         firstRender();
     }
-    window.addEventListener('scroll', syncScroll, { passive: true });
+    // editor-driven sync only: the preview never scrolls on its own, so the
+    // editor is the single source of truth and the two panes stay aligned.
+    // Wheel events are forwarded to the editor, which then drives the preview.
+    window.addEventListener('wheel', function (e) {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage('wheel:' + Math.round(e.deltaY));
+        }
+        e.preventDefault();
+    }, { passive: false });
 })();
 </script>
 )HTML";
@@ -355,9 +370,22 @@ static int g_lastCy = 0;
 static double g_dScrollRatio = 0.0;
 static int g_iAnchorIndex = -1;
 static double g_dAnchorPos = 0.0;
+static int g_iWheelDelta = 0;
 static bool g_bPageReady = false;
 static bool g_bAnchorValid = true;
 static int g_iJsHeadingCount = -1;
+static DWORD g_lastSyncTick = 0;
+
+// throttle the sync-scroll work so fast scrolling cannot flood the message
+// loop with ExecuteScript/SetFirstVisibleLine round trips
+static bool EditPreview_Throttle() noexcept {
+	const DWORD now = GetTickCount();
+	if (now - g_lastSyncTick < 40) {
+		return false;
+	}
+	g_lastSyncTick = now;
+	return true;
+}
 // heading lines in document order (0-based Sci_Line), rebuilt on refresh
 static std::vector<Sci_Line> g_headings;
 // cumulative per-line content weight; lines that render tall in the preview
@@ -406,54 +434,15 @@ static void JsonEscapeAppend(const char *text, size_t len, std::string &out) noe
 }
 
 //=============================================================================
-// Splitter window procedure
+// Splitter window procedure (fixed 1:1 split, not draggable)
 //=============================================================================
 LRESULT CALLBACK EditPreview_SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	UNREFERENCED_PARAMETER(hwnd);
+	UNREFERENCED_PARAMETER(wParam);
+	UNREFERENCED_PARAMETER(lParam);
 	switch (msg) {
-	case WM_LBUTTONDOWN:
-		SetCapture(hwnd);
-		g_bDragging = true;
-		return 0;
-
-	case WM_MOUSEMOVE:
-		if (g_bDragging) {
-			POINT pt;
-			GetCursorPos(&pt);
-			ScreenToClient(g_hwndMain, &pt);
-			int width = pt.x;
-			if (width < MD_PREVIEW_MIN_WIDTH) {
-				width = MD_PREVIEW_MIN_WIDTH;
-			} else if (width > g_lastCx - MD_PREVIEW_MIN_WIDTH - MD_PREVIEW_SPLITTER_W) {
-				width = g_lastCx - MD_PREVIEW_MIN_WIDTH - MD_PREVIEW_SPLITTER_W;
-			}
-			if (width < MD_PREVIEW_MIN_WIDTH) {
-				width = MD_PREVIEW_MIN_WIDTH;
-			}
-			g_iSplitWidth = width;
-			// move splitter and preview pane live, editor is laid out on release
-			SetWindowPos(g_hwndSplitter, nullptr, width, g_lastY, 0, 0, SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
-			if (g_controller != nullptr) {
-				RECT rc;
-				rc.left = width + MD_PREVIEW_SPLITTER_W;
-				rc.top = g_lastY;
-				rc.right = g_lastCx;
-				rc.bottom = g_lastY + g_lastCy;
-				g_controller->put_Bounds(rc);
-			}
-		}
-		return 0;
-
-	case WM_LBUTTONUP:
-		if (g_bDragging) {
-			g_bDragging = false;
-			ReleaseCapture();
-			EditPreview_SaveSplitWidth();
-			EditPreview_RequestRelayout();
-		}
-		return 0;
-
 	case WM_SETCURSOR:
-		SetCursor(LoadCursor(nullptr, IDC_SIZEWE));
+		SetCursor(LoadCursor(nullptr, IDC_ARROW));
 		return TRUE;
 
 	case WM_ERASEBKGND:
@@ -534,6 +523,9 @@ public:
 						EditPreview_Log("[msg] range=%d pos=%.3f", g_iAnchorIndex, g_dAnchorPos);
 						PostMessage(g_hwndMain, APPM_MDPREVIEW_ANCHOR, 0, 0);
 					}
+				} else if (WcsStartsWith(p, L"wheel:") && IsWindow(g_hwndMain)) {
+					g_iWheelDelta = _wtoi(p + CSTRLEN(L"wheel:"));
+					PostMessage(g_hwndMain, APPM_MDPREVIEW_WHEEL, 0, 0);
 				} else if (WcsStartsWith(p, L"headings:") && IsWindow(g_hwndMain)) {
 					// the preview reports how many headings it tagged; if this
 					// does not match our scan, fall back to proportional sync
@@ -606,9 +598,8 @@ COREWEBVIEW2_COLOR EditPreview_GetDefaultBackgroundColor() noexcept {
 //=============================================================================
 void EditPreview_Init(HWND hwnd) noexcept {
 	g_hwndMain = hwnd;
-	g_iSplitWidth = IniGetInt(INI_SECTION_NAME_FLAGS, MD_PREVIEW_WD_INI_KEY, MD_PREVIEW_SPLIT_WIDTH);
 	g_iPreviewTheme = IniGetInt(INI_SECTION_NAME_FLAGS, L"MarkdownPreviewTheme", MDPreviewTheme_Auto);
-	EditPreview_Log("[init] hwnd=%p split=%d theme=%d", hwnd, g_iSplitWidth, g_iPreviewTheme);
+	EditPreview_Log("[init] hwnd=%p theme=%d", hwnd, g_iPreviewTheme);
 	EditPreview_CreateSplitter();
 }
 
@@ -873,12 +864,8 @@ int EditPreview_OnSize(int y, int cx, int cy) noexcept {
 		EditPreview_ApplyLayout();
 		return cx;
 	}
-	if (g_iSplitWidth < MD_PREVIEW_MIN_WIDTH) {
-		g_iSplitWidth = MD_PREVIEW_MIN_WIDTH;
-	}
-	if (g_iSplitWidth > cx - MD_PREVIEW_MIN_WIDTH - MD_PREVIEW_SPLITTER_W) {
-		g_iSplitWidth = cx - MD_PREVIEW_MIN_WIDTH - MD_PREVIEW_SPLITTER_W;
-	}
+	// fixed 1:1 split
+	g_iSplitWidth = (cx - MD_PREVIEW_SPLITTER_W) / 2;
 	if (g_iSplitWidth < MD_PREVIEW_MIN_WIDTH) {
 		g_iSplitWidth = MD_PREVIEW_MIN_WIDTH;
 	}
@@ -1280,6 +1267,9 @@ static void EditPreview_SyncToPreview() noexcept {
 	if (!g_bVisible || g_webview == nullptr || g_bSyncingScroll) {
 		return;
 	}
+	if (!EditPreview_Throttle()) {
+		return;
+	}
 	const Sci_Line total = SciCall_GetLineCount();
 	if (total <= 0) {
 		return;
@@ -1404,6 +1394,9 @@ void EditPreview_SyncEditAnchor() noexcept {
 	if (!g_bVisible || g_bSyncingScroll) {
 		return;
 	}
+	if (!EditPreview_Throttle()) {
+		return;
+	}
 	if (!g_bAnchorValid) {
 		// heading anchors are unreliable, keep proportional sync only
 		return;
@@ -1439,6 +1432,25 @@ void EditPreview_SyncEditAnchor() noexcept {
 	SciCall_SetFirstVisibleLine(line);
 	g_bSyncingScroll = false;
 	EditPreview_Log("[anchor] edit->line %lld", static_cast<long long>(line));
+}
+
+//=============================================================================
+//
+// EditPreview_OnWheel()
+//
+//   The preview pane forwards wheel events here so a single scrollbar (the
+//   editor's) drives both panes.
+//
+//=============================================================================
+void EditPreview_OnWheel() noexcept {
+	if (!g_bVisible || g_iWheelDelta == 0) {
+		return;
+	}
+	if (!EditPreview_Throttle()) {
+		return;
+	}
+	const Sci_Line lines = (g_iWheelDelta < 0) ? -3 : 3;
+	SciCall(SCI_LINESCROLL, 0, lines);
 }
 
 #endif // NP2_SUPPORT_MD_PREVIEW
