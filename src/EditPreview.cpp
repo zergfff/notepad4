@@ -621,7 +621,6 @@ void EditPreview_Init(HWND hwnd) noexcept {
 	g_hwndMain = hwnd;
 	g_iPreviewTheme = IniGetInt(INI_SECTION_NAME_FLAGS, L"MarkdownPreviewTheme", MDPreviewTheme_Auto);
 	EditPreview_Log("[init] hwnd=%p theme=%d", hwnd, g_iPreviewTheme);
-	EditPreview_CreateSplitter();
 }
 
 //=============================================================================
@@ -829,25 +828,17 @@ static void EditPreview_InitWebView() noexcept {
 //
 //=============================================================================
 static void EditPreview_ApplyLayout() noexcept {
-	if (!g_bVisible) {
-		if (g_hwndSplitter != nullptr) {
-			ShowWindow(g_hwndSplitter, SW_HIDE);
-		}
-		if (g_controller != nullptr) {
-			g_controller->put_IsVisible(FALSE);
-		}
-		return;
-	}
 	if (g_controller == nullptr) {
 		g_bPendingLayout = true;
 		return;
 	}
-	if (g_hwndSplitter != nullptr) {
-		SetWindowPos(g_hwndSplitter, nullptr, g_iSplitWidth, g_lastY, MD_PREVIEW_SPLITTER_W, g_lastCy, SWP_NOZORDER | SWP_NOACTIVATE);
-		ShowWindow(g_hwndSplitter, SW_SHOW);
+	if (!g_bVisible) {
+		g_controller->put_IsVisible(FALSE);
+		return;
 	}
+	// full-screen render mode: the preview covers the whole editor area
 	RECT rc;
-	rc.left = g_iSplitWidth + MD_PREVIEW_SPLITTER_W;
+	rc.left = 0;
 	rc.top = g_lastY;
 	rc.right = g_lastCx;
 	rc.bottom = g_lastY + g_lastCy;
@@ -881,21 +872,13 @@ int EditPreview_OnSize(int y, int cx, int cy) noexcept {
 	g_lastY = y;
 	g_lastCx = cx;
 	g_lastCy = cy;
-	if (!g_bVisible) {
-		EditPreview_ApplyLayout();
-		return cx;
-	}
-	// fixed 1:1 split
-	g_iSplitWidth = (cx - MD_PREVIEW_SPLITTER_W) / 2;
-	if (g_iSplitWidth < MD_PREVIEW_MIN_WIDTH) {
-		g_iSplitWidth = MD_PREVIEW_MIN_WIDTH;
-	}
 	if (g_controller == nullptr) {
 		g_bPendingLayout = true;
-		return cx;
+	} else {
+		EditPreview_ApplyLayout();
 	}
-	EditPreview_ApplyLayout();
-	return g_iSplitWidth;
+	// render mode returns 0 so the editor is hidden, edit mode returns cx
+	return g_bVisible ? 0 : cx;
 }
 
 //=============================================================================
@@ -1241,16 +1224,16 @@ void EditPreview_Toggle() noexcept {
 		if (g_controller == nullptr) {
 			g_bPendingLayout = true;
 		}
-		EditPreview_OnDocumentChanged();
+		// immediately render the current document and jump to the caret
+		EditPreview_Refresh();
+		EditPreview_SyncToPreview();
 	} else {
 		if (g_uTimer != 0) {
 			KillTimer(g_hwndMain, ID_MDPREVIEWTIMER);
 			g_uTimer = 0;
 		}
-		EditPreview_ApplyLayout();
 	}
 
-	// re-layout the editor window
 	EditPreview_RequestRelayout();
 }
 

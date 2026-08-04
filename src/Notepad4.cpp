@@ -2149,10 +2149,16 @@ void MsgSize(HWND hwnd, WPARAM wParam, LPARAM lParam) noexcept {
 
 #if NP2_SUPPORT_MD_PREVIEW
 	const int editWidth = EditPreview_OnSize(y, cx, cy);
+	if (editWidth <= 0) {
+		// render mode: preview covers the area, editor hidden
+		ShowWindow(hwndEdit, SW_HIDE);
+	} else {
+		ShowWindow(hwndEdit, SW_SHOW);
+		SetWindowPos(hwndEdit, nullptr, x, y, editWidth, cy, SWP_NOZORDER | SWP_NOACTIVATE);
+	}
 #else
-	const int editWidth = cx;
+	SetWindowPos(hwndEdit, nullptr, x, y, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
 #endif
-	SetWindowPos(hwndEdit, nullptr, x, y, editWidth, cy, SWP_NOZORDER | SWP_NOACTIVATE);
 
 	// resize Statusbar items
 	UpdateStatusbar();
